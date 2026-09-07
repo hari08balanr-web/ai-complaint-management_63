@@ -7,6 +7,15 @@ export type TicketStatus =
   | 'Resolved'
   | 'Closed';
 
+export type ActiveView = 
+  | 'dashboard'
+  | 'tickets'
+  | 'escalations'
+  | 'diagnostics'
+  | 'chat'
+  | 'complaints'
+  | 'knowledge';
+
 export type TicketPriority = 'Low' | 'Medium' | 'High' | 'Critical';
 
 export type TicketCategory =

@@ -9,10 +9,11 @@ import {
   LogOut, 
   Sparkles,
   Users,
-  RotateCcw
+  RefreshCw,
+  Menu
 } from 'lucide-react';
 import { User } from '../lib/firebase';
-import { loginWithGoogle, loginAsGuest, logOut } from '../lib/firebase';
+import { loginWithGoogle, logOut } from '../lib/firebase';
 
 interface HeaderProps {
   user: User | null;
@@ -21,6 +22,7 @@ interface HeaderProps {
   onOpenNewTicket: () => void;
   onOpenAiChat: () => void;
   onResetData: () => void;
+  onToggleMobileSidebar?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -29,7 +31,8 @@ export const Header: React.FC<HeaderProps> = ({
   setRole,
   onOpenNewTicket,
   onOpenAiChat,
-  onResetData
+  onResetData,
+  onToggleMobileSidebar
 }) => {
   return (
     <header className="sticky top-0 z-40 bg-white/90 backdrop-blur-md border-b border-slate-200/80 shadow-xs">
@@ -38,6 +41,16 @@ export const Header: React.FC<HeaderProps> = ({
           
           {/* Logo and Brand */}
           <div className="flex items-center gap-3">
+            {onToggleMobileSidebar && (
+              <button
+                type="button"
+                onClick={onToggleMobileSidebar}
+                className="lg:hidden p-2 rounded-xl text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-colors"
+                title="Open menu"
+              >
+                <Menu className="w-5 h-5" />
+              </button>
+            )}
             <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-600 via-indigo-700 to-blue-700 flex items-center justify-center text-white shadow-md shadow-indigo-500/20 ring-2 ring-indigo-100">
               <Bot className="w-6 h-6" />
             </div>
@@ -154,14 +167,14 @@ export const Header: React.FC<HeaderProps> = ({
               )}
             </div>
 
-            {/* Reset data helper */}
+            {/* Sync workspace data helper */}
             <button
               type="button"
               onClick={onResetData}
               className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition-colors"
-              title="Reset to Sample Demo Tickets"
+              title="Sync Workspace Tickets"
             >
-              <RotateCcw className="w-3.5 h-3.5" />
+              <RefreshCw className="w-3.5 h-3.5" />
             </button>
 
           </div>

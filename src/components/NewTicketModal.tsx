@@ -120,8 +120,8 @@ export const NewTicketModal: React.FC<NewTicketModalProps> = ({
 
       const randomNum = Math.floor(1000 + Math.random() * 9000);
       const ticketId = `ticket-${Date.now()}`;
-      const requesterName = user?.displayName || (user?.email ? user.email.split('@')[0] : 'Demo Requester');
-      const requesterEmail = user?.email || 'demo@company.io';
+      const requesterName = user?.displayName || (user?.email ? user.email.split('@')[0] : 'Authorized Employee');
+      const requesterEmail = user?.email || 'employee@organization.internal';
 
       const newTicket: ServiceTicket = {
         id: ticketId,
@@ -131,7 +131,7 @@ export const NewTicketModal: React.FC<NewTicketModalProps> = ({
         category,
         priority,
         status: 'AI Diagnostics',
-        requesterId: user?.uid || 'guest-user',
+        requesterId: user?.uid || 'enterprise-user',
         requesterName,
         requesterEmail,
         systemEnvironment: systemEnvironment || undefined,

@@ -117,24 +117,47 @@ export async function createTicket(ticket: ServiceTicket): Promise<void> {
   }
 }
 
-export async function updateTicketStatus(ticketId: string, newStatus: TicketStatus): Promise<void> {
+export async function updateTicketStatus(
+  ticketId: string, 
+  newStatus: TicketStatus,
+  note?: string
+): Promise<void> {
   const current = getLocalTickets();
   const index = current.findIndex(t => t.id === ticketId);
+  const now = new Date().toISOString();
+  
   if (index !== -1) {
+    const updatedMessages = [...current[index].messages];
+    if (note) {
+      updatedMessages.push({
+        id: `msg-status-${Date.now()}`,
+        sender: 'agent',
+        senderName: 'Tier 2 Engineering',
+        timestamp: now,
+        text: `**Status changed to ${newStatus}**: ${note}`,
+        isSolutionProposal: newStatus === 'Resolved'
+      });
+    }
+
     current[index] = {
       ...current[index],
       status: newStatus,
-      updatedAt: new Date().toISOString()
+      updatedAt: now,
+      messages: updatedMessages
     };
     saveLocalTickets(current);
   }
 
   try {
     const docRef = doc(db, 'tickets', ticketId);
-    await updateDoc(docRef, {
+    const updatePayload: Record<string, any> = {
       status: newStatus,
-      updatedAt: new Date().toISOString()
-    });
+      updatedAt: now
+    };
+    if (index !== -1) {
+      updatePayload.messages = current[index].messages;
+    }
+    await updateDoc(docRef, updatePayload);
   } catch (err) {
     console.warn('Could not update ticket in Firestore:', err);
   }

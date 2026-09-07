@@ -1,0 +1,6 @@
+{
+  "name": "AI Technical Support & Complaint Management System",
+  "description": "AI-powered technical support and complaint management system for submitting service requests, AI diagnostics, real-time ticket tracking, and team escalations.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

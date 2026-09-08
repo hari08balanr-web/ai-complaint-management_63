@@ -1,355 +1,344 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
-
-import React, { useState, useEffect } from 'react';
-import { Header } from './components/Header';
-import { Sidebar } from './components/Sidebar';
-import { AnalyticsBar } from './components/AnalyticsBar';
-import { TicketList } from './components/TicketList';
-import { TicketDetail } from './components/TicketDetail';
-import { DashboardView } from './components/DashboardView';
-import { EscalationsView } from './components/EscalationsView';
-import { DiagnosticsHubView } from './components/DiagnosticsHubView';
-import { AiChatView } from './components/AiChatView';
-import { ComplaintsView } from './components/ComplaintsView';
-import { KnowledgeBaseView } from './components/KnowledgeBaseView';
-import { SignInPage } from './components/SignInPage';
-import { NewTicketModal } from './components/NewTicketModal';
-import { AiChatbotModal } from './components/AiChatbotModal';
-import { ServiceTicket, ActiveView } from './types';
-import { subscribeTickets, resetToSampleTickets } from './services/ticketService';
-import { auth, onAuthStateChanged, User } from './lib/firebase';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
-  Bot, 
-  Sparkles, 
-  LifeBuoy, 
-  PlusCircle, 
-  MessageSquareCode, 
-  Inbox, 
-  ShieldCheck, 
-  Cpu, 
-  CheckCircle2, 
-  ArrowRight
-} from 'lucide-react';
+  AppUser, 
+  Ticket, 
+  ActiveNavTab, 
+  ToastNotification, 
+  TicketStatus 
+} from './types';
+import { 
+  auth, 
+  getUserProfile, 
+  syncUserProfile, 
+  subscribeToTickets, 
+  createTicketWithAiFirstResponse,
+  escalateTicket 
+} from './lib/firebase';
+import { onAuthStateChanged, signInAnonymously } from 'firebase/auth';
+import { Navbar } from './components/Navbar';
+import { Sidebar } from './components/Sidebar';
+import { UserDashboard } from './components/UserDashboard';
+import { AgentQueueDashboard } from './components/AgentQueueDashboard';
+import { AdminDashboard } from './components/AdminDashboard';
+import { TicketDetailView } from './components/TicketDetailView';
+import { NewTicketModal } from './components/NewTicketModal';
+import { EscalateModal } from './components/EscalateModal';
+import { AuthModal } from './components/AuthModal';
+import { FaqView } from './components/FaqView';
+import { ToastContainer } from './components/ToastContainer';
+import { Sparkles, Layers, ShieldCheck } from 'lucide-react';
 
 export default function App() {
-  const [user, setUser] = useState<User | null>(null);
+  const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
-  const [role, setRole] = useState<'customer' | 'support_agent'>('customer');
-  const [activeView, setActiveView] = useState<ActiveView>('dashboard');
-  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
-  const [tickets, setTickets] = useState<ServiceTicket[]>([]);
+  const [tickets, setTickets] = useState<Ticket[]>([]);
+  const [activeTab, setActiveTab] = useState<ActiveNavTab>('tickets');
   const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null);
-  
+  const [selectedStatusFilter, setSelectedStatusFilter] = useState<string | null>(null);
+
   // Modals
+  const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [isNewTicketOpen, setIsNewTicketOpen] = useState(false);
-  const [isAiChatOpen, setIsAiChatOpen] = useState(false);
-  const [initialTicketData, setInitialTicketData] = useState<{ title?: string; description?: string } | undefined>(undefined);
+  const [escalatingTicket, setEscalatingTicket] = useState<Ticket | null>(null);
+
+  // Notifications
+  const [notifications, setNotifications] = useState<ToastNotification[]>([]);
+  const previousTicketsRef = useRef<Map<string, TicketStatus>>(new Map());
+
+  // Helper to add toast notification
+  const addNotification = (
+    title: string, 
+    message: string, 
+    type: 'info' | 'success' | 'warning' | 'error' = 'info', 
+    ticketId?: string
+  ) => {
+    const newToast: ToastNotification = {
+      id: `${Date.now()}-${Math.random()}`,
+      title,
+      message,
+      type,
+      ticketId,
+      timestamp: Date.now()
+    };
+    setNotifications((prev) => [newToast, ...prev].slice(0, 10));
+
+    // Auto remove after 7 seconds
+    setTimeout(() => {
+      setNotifications((prev) => prev.filter(n => n.id !== newToast.id));
+    }, 7000);
+  };
 
   // 1. Firebase Auth listener
   useEffect(() => {
-    const unsubscribeAuth = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
+    const unsub = onAuthStateChanged(auth, async (fbUser) => {
+      if (fbUser) {
+        try {
+          const profile = await syncUserProfile(fbUser);
+          setCurrentUser(profile);
+        } catch (err) {
+          console.error('Failed to sync profile:', err);
+        }
+      } else {
+        // Automatically create or sign into guest session if none exists
+        try {
+          const res = await signInAnonymously(auth);
+          const profile = await syncUserProfile(res.user, 'user');
+          setCurrentUser(profile);
+        } catch (anonErr) {
+          console.warn('Anonymous sign-in error:', anonErr);
+          setCurrentUser(null);
+        }
+      }
       setAuthLoading(false);
     });
-    return () => unsubscribeAuth();
+    return () => unsub();
   }, []);
 
-  // 2. Real-time Ticket Synchronization (Firestore + Local fallback)
+  // 2. Real-time Tickets listener (Firestore onSnapshot)
   useEffect(() => {
-    const unsubscribeTickets = subscribeTickets(
-      (updatedTickets) => {
-        setTickets(updatedTickets);
-        // Default select first ticket if none selected on desktop
-        if (updatedTickets.length > 0) {
-          setSelectedTicketId((prev) => prev || updatedTickets[0].id);
-        }
+    if (!currentUser) return;
+
+    const unsub = subscribeToTickets(
+      currentUser,
+      (realtimeTickets) => {
+        // Check for status changes to trigger real-time toast notifications
+        const prevMap = previousTicketsRef.current;
+        realtimeTickets.forEach((t) => {
+          const prevStatus = prevMap.get(t.id);
+          if (prevStatus && prevStatus !== t.status) {
+            let toastType: 'info' | 'success' | 'warning' = 'info';
+            if (t.status === 'Resolved') toastType = 'success';
+            if (t.status === 'Escalated') toastType = 'warning';
+
+            addNotification(
+              `Status Update: ${t.ticketId}`,
+              `Ticket status changed from "${prevStatus}" to "${t.status}".`,
+              toastType,
+              t.id
+            );
+          }
+          prevMap.set(t.id, t.status);
+        });
+
+        setTickets(realtimeTickets);
       },
       (error) => {
-        console.warn('Real-time sync alert:', error);
+        console.warn('Subscription error:', error);
       }
     );
 
-    return () => unsubscribeTickets();
-  }, []);
+    return () => unsub();
+  }, [currentUser]);
 
-  const selectedTicket = tickets.find((t) => t.id === selectedTicketId) || null;
+  // 3. Automated Background SLA Escalation Checker (Every 30 seconds)
+  useEffect(() => {
+    const checkSlas = async () => {
+      if (!tickets.length || !currentUser) return;
+      const now = Date.now();
 
-  const handleTicketCreated = (newTicket: ServiceTicket) => {
-    setSelectedTicketId(newTicket.id);
-    setActiveView('tickets');
-  };
+      for (const t of tickets) {
+        if ((t.status === 'Open' || t.status === 'In Progress') && t.slaDeadline < now) {
+          try {
+            await escalateTicket(
+              t.id,
+              t.escalationLevel || 0,
+              'Automated SLA Escalation Engine: Resolution deadline exceeded.',
+              'System Scheduler'
+            );
+            addNotification(
+              `⚠️ SLA Breached: ${t.ticketId}`,
+              `Ticket exceeded resolution deadline. Automatically escalated to Tier ${(t.escalationLevel || 0) + 1}.`,
+              'error',
+              t.id
+            );
+          } catch (err) {
+            console.error('Auto-escalation failed:', err);
+          }
+        }
+      }
+    };
 
-  const handleConvertToTicketFromChat = (title: string, description: string) => {
-    setInitialTicketData({ title, description });
-    setIsNewTicketOpen(true);
-  };
+    const interval = setInterval(checkSlas, 30000);
+    return () => clearInterval(interval);
+  }, [tickets, currentUser]);
 
-  const handleResetData = async () => {
+  // Seed sample data if Firestore is empty
+  const handleSeedSampleTickets = async () => {
+    if (!currentUser) return;
     try {
-      await resetToSampleTickets();
-    } catch (e) {
-      console.warn('Workspace sync warning:', e);
+      const sample1 = await createTicketWithAiFirstResponse({
+        userId: currentUser.uid,
+        requesterName: currentUser.name,
+        requesterEmail: currentUser.email,
+        title: 'Production 504 Gateway Timeout during checkout processing',
+        description: 'Users report checkout transactions failing with HTTP 504. High latency observed on database connection pool.',
+        category: 'Cloud & Infrastructure',
+        priority: 'Critical',
+        slaHours: 1,
+        aiSuggestedResponse: 'Automated Diagnostic Scan: High API proxy latency detected. Investigating upstream microservice health checks and database transaction locks.'
+      });
+
+      const sample2 = await createTicketWithAiFirstResponse({
+        userId: currentUser.uid,
+        requesterName: 'DevOps Lead Alex',
+        requesterEmail: 'alex.devops@techcorp.com',
+        title: 'SAML 2.0 Single Sign-On redirect loop on corporate portal',
+        description: 'Enterprise users are unable to authenticate via Okta IdP. Signature verification is intermittently failing.',
+        category: 'Account & Authentication',
+        priority: 'High',
+        slaHours: 4,
+        aiSuggestedResponse: 'Diagnostic Scan: Likely X.509 certificate expiry or clock skew between identity provider and authorization server.'
+      });
+
+      addNotification('Tickets Seeded', 'Sample enterprise tickets loaded successfully.', 'success', sample1);
+    } catch (err) {
+      console.error('Seed error:', err);
     }
   };
 
-  const handleOpenTicketDetails = (ticketId: string) => {
-    setSelectedTicketId(ticketId);
-    setActiveView('tickets');
+  // Status change notification callback
+  const handleStatusChangeNotify = (oldStatus: TicketStatus, newStatus: TicketStatus, ticket: Ticket) => {
+    addNotification(
+      `Status Changed: ${ticket.ticketId}`,
+      `Updated from ${oldStatus} to ${newStatus}`,
+      newStatus === 'Resolved' ? 'success' : newStatus === 'Escalated' ? 'warning' : 'info',
+      ticket.id
+    );
   };
 
-  // 1. Loading Authentication State
   if (authLoading) {
     return (
-      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-white">
-        <div className="w-14 h-14 rounded-2xl bg-indigo-600 flex items-center justify-center animate-pulse mb-4 shadow-xl shadow-indigo-500/25">
-          <Bot className="w-8 h-8 text-white" />
-        </div>
-        <p className="text-sm font-bold tracking-tight text-slate-200">Initializing NexusSupport...</p>
-        <p className="text-xs text-slate-500 mt-1">Verifying secure authentication session</p>
+      <div className="h-screen w-screen flex flex-col items-center justify-center bg-slate-900 text-white space-y-4">
+        <div className="w-10 h-10 border-3 border-blue-500/30 border-t-blue-500 rounded-full animate-spin" />
+        <p className="text-sm font-medium text-slate-400">
+          Connecting to ResolveDesk Enterprise Firestore...
+        </p>
       </div>
-    );
-  }
-
-  // 2. Compulsory Sign-In: If not authenticated, require sign-in first
-  if (!user) {
-    return (
-      <SignInPage
-        currentRole={role}
-        setRole={setRole}
-        onSignedIn={(signedInUser, selectedRole) => {
-          setUser(signedInUser);
-          setRole(selectedRole);
-        }}
-      />
     );
   }
 
   return (
-    <div className="min-h-screen flex bg-slate-100/70 text-slate-900 font-sans">
-      
-      {/* Sidebar Navigation */}
-      <Sidebar
-        activeView={activeView}
-        setActiveView={setActiveView}
-        role={role}
-        setRole={setRole}
-        tickets={tickets}
-        user={user}
-        onOpenNewTicket={() => {
-          setInitialTicketData(undefined);
-          setIsNewTicketOpen(true);
-        }}
-        onResetData={handleResetData}
-        isMobileOpen={isMobileSidebarOpen}
-        setIsMobileOpen={setIsMobileSidebarOpen}
+    <div className="h-screen w-screen flex flex-col bg-slate-100 text-slate-900 font-sans overflow-hidden">
+      {/* Top Navbar */}
+      <Navbar
+        currentUser={currentUser}
+        onOpenAuth={() => setIsAuthOpen(true)}
+        onOpenHelp={() => { setSelectedTicketId(null); setActiveTab('faq'); }}
+        notifications={notifications}
+        onClearNotifications={() => setNotifications([])}
+        onSelectTicketFromToast={(tid) => setSelectedTicketId(tid)}
       />
 
-      {/* Main Content Area */}
-      <div className="flex-1 flex flex-col min-w-0 lg:pl-72 transition-all duration-300">
-        
-        {/* Top Global Header */}
-        <Header
-          user={user}
-          role={role}
-          setRole={setRole}
-          onOpenNewTicket={() => {
-            setInitialTicketData(undefined);
-            setIsNewTicketOpen(true);
+      {/* Main Layout: Sidebar + Content */}
+      <div className="flex-1 flex overflow-hidden">
+        {/* Sidebar Navigation */}
+        <Sidebar
+          currentUser={currentUser}
+          activeTab={activeTab}
+          onSelectTab={(tab) => {
+            setSelectedTicketId(null);
+            setActiveTab(tab);
           }}
-          onOpenAiChat={() => setIsAiChatOpen(true)}
-          onResetData={handleResetData}
-          onToggleMobileSidebar={() => setIsMobileSidebarOpen((prev) => !prev)}
+          onOpenNewTicket={() => setIsNewTicketOpen(true)}
+          tickets={tickets}
+          selectedStatusFilter={selectedStatusFilter}
+          onSelectStatusFilter={(status) => {
+            setSelectedTicketId(null);
+            setSelectedStatusFilter(status);
+          }}
         />
 
-        {/* Dynamic Views */}
-        <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 flex flex-col">
-          
-          {/* 1. Dashboard View */}
-          {activeView === 'dashboard' && (
-            <DashboardView
-              tickets={tickets}
-              onSelectTicket={handleOpenTicketDetails}
-              setActiveView={setActiveView}
-              onOpenNewTicket={() => {
-                setInitialTicketData(undefined);
-                setIsNewTicketOpen(true);
-              }}
-              role={role}
-            />
-          )}
-
-          {/* 2. Tickets View (List + Detail Workbench) */}
-          {activeView === 'tickets' && (
-            <div className="flex flex-col flex-1">
-              {/* Role Banner & Quick Guide */}
-              <div className="mb-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-white rounded-2xl border border-slate-200/80 shadow-2xs">
-                <div className="flex items-center gap-3">
-                  <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
-                    role === 'customer' ? 'bg-indigo-100 text-indigo-700' : 'bg-amber-100 text-amber-700'
-                  }`}>
-                    {role === 'customer' ? <Sparkles className="w-4 h-4" /> : <ShieldCheck className="w-4 h-4" />}
-                  </div>
-                  <div>
-                    <p className="text-xs font-bold text-slate-800">
-                      Current Mode: <span className="text-indigo-600">{role === 'customer' ? 'Customer / Requester Portal' : 'Tier 2 Support Engineering Desk'}</span>
-                    </p>
-                    <p className="text-[11px] text-slate-500">
-                      {role === 'customer'
-                        ? 'Submit issues, receive instant Gemini root-cause diagnostics, and escalate to human engineers.'
-                        : 'Review AI diagnostic dossiers, manage status, add internal engineering notes, and resolve escalated tickets.'}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2 self-end sm:self-center">
-                  <button
-                    type="button"
-                    onClick={() => setRole(role === 'customer' ? 'support_agent' : 'customer')}
-                    className="text-xs font-semibold px-3 py-1.5 rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-50 transition-colors flex items-center gap-1.5"
-                  >
-                    <span>Switch to {role === 'customer' ? 'Agent View' : 'Customer View'}</span>
-                    <ArrowRight className="w-3 h-3 text-slate-400" />
-                  </button>
-                </div>
+        {/* Content View Area */}
+        <main className="flex-1 flex flex-col overflow-hidden relative">
+          {/* Quick Empty-Database Helper Banner */}
+          {tickets.length === 0 && !selectedTicketId && (
+            <div className="bg-blue-50 border-b border-blue-200 px-6 py-2.5 flex items-center justify-between text-xs text-blue-900">
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-blue-600 shrink-0" />
+                <span>
+                  Welcome to ResolveDesk! Firestore is currently clear. You can submit a real ticket or load enterprise sample cases.
+                </span>
               </div>
-
-              {/* Analytics KPI Ribbon */}
-              <AnalyticsBar tickets={tickets} />
-
-              {/* Dynamic Responsive Layout: List & Detail */}
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 flex-1 min-h-[600px]">
-                
-                {/* Left / List View: 4 columns on large screens, hidden on small screens if ticket selected */}
-                <div className={`lg:col-span-4 h-full ${selectedTicket ? 'hidden lg:block' : 'block'}`}>
-                  <TicketList
-                    tickets={tickets}
-                    selectedTicketId={selectedTicketId}
-                    onSelectTicket={(ticket) => setSelectedTicketId(ticket.id)}
-                    role={role}
-                  />
-                </div>
-
-                {/* Right / Detail View: 8 columns on large screens */}
-                <div className={`lg:col-span-8 h-full ${!selectedTicket ? 'hidden lg:block' : 'block'}`}>
-                  {selectedTicket ? (
-                    <TicketDetail
-                      ticket={selectedTicket}
-                      onBack={() => setSelectedTicketId(null)}
-                      currentUser={user}
-                      role={role}
-                    />
-                  ) : (
-                    <div className="bg-white rounded-2xl border border-slate-200 shadow-xs h-full flex flex-col items-center justify-center p-8 text-center space-y-4">
-                      <div className="w-16 h-16 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center">
-                        <Inbox className="w-8 h-8" />
-                      </div>
-                      <div className="max-w-md space-y-1">
-                        <h3 className="font-extrabold text-slate-900 text-base sm:text-lg">
-                          No Ticket Selected
-                        </h3>
-                        <p className="text-xs sm:text-sm text-slate-500">
-                          Select a ticket from the left panel to inspect its Gemini diagnostic analysis, activity timeline, and escalation options.
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-3 pt-2">
-                        <button
-                          type="button"
-                          onClick={() => setIsNewTicketOpen(true)}
-                          className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 transition-colors shadow-xs"
-                        >
-                          <PlusCircle className="w-4 h-4" />
-                          Submit New Request
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setIsAiChatOpen(true)}
-                          className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold rounded-xl border border-slate-300 text-slate-700 hover:bg-slate-50 transition-colors"
-                        >
-                          <MessageSquareCode className="w-4 h-4 text-indigo-600" />
-                          AI Troubleshooter
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-              </div>
+              <button
+                onClick={handleSeedSampleTickets}
+                className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg transition shadow-2xs"
+              >
+                Load Demo Tickets
+              </button>
             </div>
           )}
 
-          {/* 3. Tier 2 Escalations View */}
-          {activeView === 'escalations' && (
-            <EscalationsView
+          {/* Render Active View */}
+          {selectedTicketId ? (
+            <TicketDetailView
+              ticketId={selectedTicketId}
+              currentUser={currentUser}
+              onBack={() => setSelectedTicketId(null)}
+              onOpenEscalate={(t) => setEscalatingTicket(t)}
+              onStatusChangeNotify={handleStatusChangeNotify}
+            />
+          ) : activeTab === 'queue' ? (
+            <AgentQueueDashboard
               tickets={tickets}
-              onSelectTicket={handleOpenTicketDetails}
-              role={role}
+              currentUser={currentUser}
+              onSelectTicket={(tid) => setSelectedTicketId(tid)}
+              onOpenNewTicket={() => setIsNewTicketOpen(true)}
+              selectedStatusFilter={selectedStatusFilter}
             />
-          )}
-
-          {/* 4. AI Diagnostics Sandbox & Batch Analyzer */}
-          {activeView === 'diagnostics' && (
-            <DiagnosticsHubView
+          ) : activeTab === 'agents' || activeTab === 'analytics' ? (
+            <AdminDashboard
               tickets={tickets}
-              onSelectTicket={handleOpenTicketDetails}
-              onOpenNewTicketWithData={(data) => {
-                setInitialTicketData(data);
-                setIsNewTicketOpen(true);
-              }}
+              currentUser={currentUser}
+              onSelectTicket={(tid) => setSelectedTicketId(tid)}
             />
-          )}
-
-          {/* 5. AI Troubleshooting Assistant */}
-          {activeView === 'chat' && (
-            <AiChatView
-              onConvertToTicket={handleConvertToTicketFromChat}
-            />
-          )}
-
-          {/* 6. Service Complaints & SLA Monitor */}
-          {activeView === 'complaints' && (
-            <ComplaintsView
+          ) : activeTab === 'faq' ? (
+            <FaqView />
+          ) : (
+            <UserDashboard
               tickets={tickets}
-              onSelectTicket={handleOpenTicketDetails}
-              onOpenNewTicketWithData={(data) => {
-                setInitialTicketData(data);
-                setIsNewTicketOpen(true);
-              }}
+              onSelectTicket={(tid) => setSelectedTicketId(tid)}
+              onOpenNewTicket={() => setIsNewTicketOpen(true)}
+              selectedStatusFilter={selectedStatusFilter}
             />
           )}
-
-          {/* 7. Knowledge Base & Runbooks */}
-          {activeView === 'knowledge' && (
-            <KnowledgeBaseView
-              setActiveView={setActiveView}
-              onOpenNewTicketWithData={(data) => {
-                setInitialTicketData(data);
-                setIsNewTicketOpen(true);
-              }}
-            />
-          )}
-
         </main>
       </div>
 
-      {/* New Ticket Modal */}
+      {/* Floating In-App Toast Container */}
+      <ToastContainer
+        notifications={notifications}
+        onDismiss={(id) => setNotifications((prev) => prev.filter(n => n.id !== id))}
+        onSelectTicket={(tid) => setSelectedTicketId(tid)}
+      />
+
+      {/* Modals */}
       <NewTicketModal
         isOpen={isNewTicketOpen}
         onClose={() => setIsNewTicketOpen(false)}
-        user={user}
-        onTicketCreated={handleTicketCreated}
-        initialData={initialTicketData}
+        currentUser={currentUser}
+        onTicketCreated={(newId) => {
+          setSelectedTicketId(newId);
+          addNotification('Ticket Submitted', 'AI analysis complete & SLA timer started.', 'success', newId);
+        }}
       />
 
-      {/* Interactive Gemini Chatbot Modal */}
-      <AiChatbotModal
-        isOpen={isAiChatOpen}
-        onClose={() => setIsAiChatOpen(false)}
-        onConvertToTicket={handleConvertToTicketFromChat}
+      <EscalateModal
+        isOpen={Boolean(escalatingTicket)}
+        onClose={() => setEscalatingTicket(null)}
+        ticket={escalatingTicket}
+        triggeredByName={currentUser?.name || 'Support Agent'}
+        onSuccess={() => {
+          addNotification('Ticket Escalated', 'Reassigned to higher engineering tier.', 'warning', escalatingTicket?.id);
+        }}
       />
 
+      <AuthModal
+        isOpen={isAuthOpen}
+        onClose={() => setIsAuthOpen(false)}
+        onSuccess={() => {
+          addNotification('Signed In', 'Welcome to ResolveDesk AI Workspace.', 'success');
+        }}
+      />
     </div>
   );
 }

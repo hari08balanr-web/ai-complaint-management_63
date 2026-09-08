@@ -1,42 +1,28 @@
 import React, { useState } from 'react';
+import { AppUser, TicketCategory, TicketPriority } from '../types';
+import { createTicketWithAiFirstResponse } from '../lib/firebase';
 import { 
   X, 
   Sparkles, 
+  Paperclip, 
   AlertCircle, 
   Send, 
-  Loader2, 
   CheckCircle2, 
-  Cpu, 
-  Layers, 
-  Code,
-  Lightbulb
+  Upload,
+  FileText
 } from 'lucide-react';
-import { 
-  TicketCategory, 
-  TicketPriority, 
-  ServiceTicket, 
-  AiDiagnosticAnalysis 
-} from '../types';
-import { requestAiDiagnosis } from '../services/aiService';
-import { createTicket } from '../services/ticketService';
-import { User } from '../lib/firebase';
 
 interface NewTicketModalProps {
   isOpen: boolean;
   onClose: () => void;
-  user: User | null;
-  onTicketCreated: (ticket: ServiceTicket) => void;
-  initialData?: {
-    title?: string;
-    description?: string;
-    category?: TicketCategory;
-  };
+  currentUser: AppUser | null;
+  onTicketCreated: (ticketId: string) => void;
 }
 
 const CATEGORIES: TicketCategory[] = [
   'Software Bug',
-  'Cloud & Infrastructure',
   'Network & Connectivity',
+  'Cloud & Infrastructure',
   'Account & Authentication',
   'Billing & Invoicing',
   'Performance & Latency',
@@ -44,187 +30,198 @@ const CATEGORIES: TicketCategory[] = [
   'Service Complaint'
 ];
 
-const PRIORITIES: TicketPriority[] = ['Low', 'Medium', 'High', 'Critical'];
-
 export const NewTicketModal: React.FC<NewTicketModalProps> = ({
   isOpen,
   onClose,
-  user,
-  onTicketCreated,
-  initialData
+  currentUser,
+  onTicketCreated
 }) => {
-  const [title, setTitle] = useState(initialData?.title || '');
-  const [category, setCategory] = useState<TicketCategory>(initialData?.category || 'Software Bug');
-  const [priority, setPriority] = useState<TicketPriority>('Medium');
-  const [description, setDescription] = useState(initialData?.description || '');
-  const [systemEnvironment, setSystemEnvironment] = useState('');
-  const [errorLogs, setErrorLogs] = useState('');
-  
-  // AI Pre-Diagnosis State
-  const [isDiagnosing, setIsDiagnosing] = useState(false);
-  const [preDiagnosis, setPreDiagnosis] = useState<AiDiagnosticAnalysis | null>(null);
+  const [title, setTitle] = useState('');
+  const [description, setDescription] = useState('');
+  const [category, setCategory] = useState<TicketCategory>('Software Bug');
+  const [fileAttachment, setFileAttachment] = useState<{ name: string; url: string } | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isClassifying, setIsClassifying] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [aiPreview, setAiPreview] = useState<{
+    priority: TicketPriority;
+    category: string;
+    suggestedResponse: string;
+    slaHours: number;
+  } | null>(null);
 
   if (!isOpen) return null;
 
-  const handlePreDiagnose = async () => {
+  // Real-time AI classification preview
+  const handleAiPreTriage = async () => {
     if (!title.trim() || !description.trim()) {
-      alert('Please provide at least a title and description for AI diagnosis.');
+      setError('Please enter both Title and Description for AI analysis.');
       return;
     }
-    setIsDiagnosing(true);
+    setError(null);
+    setIsClassifying(true);
     try {
-      const result = await requestAiDiagnosis({
-        title,
-        description,
-        category,
-        systemEnvironment,
-        errorLogs
+      const res = await fetch('/api/tickets/classify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, description }),
       });
-      setPreDiagnosis(result);
-      if (result.detectedCategory && CATEGORIES.includes(result.detectedCategory)) {
-        setCategory(result.detectedCategory);
+      if (!res.ok) throw new Error('AI Classification request failed');
+      const data = await res.json();
+      setAiPreview(data);
+      if (data.category && CATEGORIES.includes(data.category as TicketCategory)) {
+        setCategory(data.category as TicketCategory);
       }
-      if (result.suggestedPriority && PRIORITIES.includes(result.suggestedPriority)) {
-        setPriority(result.suggestedPriority);
-      }
-    } catch (err) {
-      console.error('Error pre-diagnosing:', err);
+    } catch (err: unknown) {
+      console.warn('AI Triage error:', err);
+      setError('AI Triage could not reach the server. Standard submission is still available.');
     } finally {
-      setIsDiagnosing(false);
+      setIsClassifying(false);
     }
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Read small attachment as data URI
+    const reader = new FileReader();
+    reader.onload = () => {
+      setFileAttachment({
+        name: file.name,
+        url: typeof reader.result === 'string' ? reader.result : ''
+      });
+    };
+    reader.readAsDataURL(file);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title.trim() || !description.trim()) return;
+    if (!currentUser) {
+      setError('You must be signed in to submit a ticket.');
+      return;
+    }
+    if (!title.trim() || !description.trim()) {
+      setError('Title and Description are required.');
+      return;
+    }
 
+    setError(null);
     setIsSubmitting(true);
+
     try {
-      // If user hasn't pre-diagnosed, run diagnosis now
-      let diagnosis = preDiagnosis;
-      let welcomeMsg = '';
-      if (!diagnosis) {
-        const aiRes = await requestAiDiagnosis({
-          title,
-          description,
-          category,
-          systemEnvironment,
-          errorLogs
+      // 1. Call Gemini API server-side endpoint for classification and AI initial response
+      let classifiedCategory = category;
+      let classifiedPriority: TicketPriority = 'Medium';
+      let slaHours = 24;
+      let aiSuggestedResponse = `Thank you for contacting technical support regarding "${title}". Our team has logged this request and an engineer will review it shortly.`;
+
+      try {
+        const classifyRes = await fetch('/api/tickets/classify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title, description }),
         });
-        diagnosis = aiRes;
-        welcomeMsg = aiRes.welcomeDiagnosticMessage;
-      } else {
-        welcomeMsg = `### AI Technical Diagnosis\n\n**Root Cause Hypothesis:**\n${diagnosis.rootCauseHypothesis}\n\n**Immediate Remediation Steps:**\n${diagnosis.suggestedFixSteps.map((s, idx) => `${idx + 1}. ${s}`).join('\n')}`;
+        if (classifyRes.ok) {
+          const aiData = await classifyRes.json();
+          classifiedCategory = aiData.category || category;
+          classifiedPriority = aiData.priority || 'Medium';
+          slaHours = aiData.slaHours || (classifiedPriority === 'Critical' ? 1 : classifiedPriority === 'High' ? 4 : 24);
+          aiSuggestedResponse = aiData.suggestedResponse || aiSuggestedResponse;
+        }
+      } catch (classifyErr) {
+        console.warn('Classification fetch fallback used:', classifyErr);
       }
 
-      const randomNum = Math.floor(1000 + Math.random() * 9000);
-      const ticketId = `ticket-${Date.now()}`;
-      const requesterName = user?.displayName || (user?.email ? user.email.split('@')[0] : 'Authorized Employee');
-      const requesterEmail = user?.email || 'employee@organization.internal';
-
-      const newTicket: ServiceTicket = {
-        id: ticketId,
-        ticketNumber: `SR-${randomNum}`,
+      // 2. Write ticket and initial AI response into Firestore
+      const newTicketId = await createTicketWithAiFirstResponse({
+        userId: currentUser.uid,
+        requesterName: currentUser.name,
+        requesterEmail: currentUser.email,
         title,
         description,
-        category,
-        priority,
-        status: 'AI Diagnostics',
-        requesterId: user?.uid || 'enterprise-user',
-        requesterName,
-        requesterEmail,
-        systemEnvironment: systemEnvironment || undefined,
-        errorLogs: errorLogs || undefined,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        aiAnalysis: diagnosis,
-        escalation: {
-          isEscalated: false,
-          internalNotes: []
-        },
-        messages: [
-          {
-            id: `msg-${Date.now()}-req`,
-            sender: 'user',
-            senderName: requesterName,
-            timestamp: new Date().toISOString(),
-            text: description
-          },
-          {
-            id: `msg-${Date.now()}-ai`,
-            sender: 'ai',
-            senderName: 'Gemini Support Co-Pilot',
-            timestamp: new Date(Date.now() + 500).toISOString(),
-            text: welcomeMsg,
-            isSolutionProposal: true
-          }
-        ]
-      };
+        category: classifiedCategory,
+        priority: classifiedPriority,
+        slaHours,
+        aiSuggestedResponse,
+        attachmentUrl: fileAttachment?.url,
+        attachmentName: fileAttachment?.name
+      });
 
-      await createTicket(newTicket);
-      onTicketCreated(newTicket);
+      // 3. Reset form and notify parent
+      setTitle('');
+      setDescription('');
+      setFileAttachment(null);
+      setAiPreview(null);
+      onTicketCreated(newTicketId);
       onClose();
-    } catch (err) {
-      console.error('Failed to submit ticket:', err);
-      alert('Error creating ticket. Please try again.');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to submit ticket';
+      setError(msg);
     } finally {
       setIsSubmitting(false);
     }
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs overflow-y-auto animate-fadeIn">
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-2xl w-full my-8 overflow-hidden">
-        
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4 overflow-y-auto">
+      <div 
+        id="new-ticket-modal"
+        className="w-full max-w-2xl bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden my-8"
+      >
         {/* Header */}
-        <div className="px-6 py-4 bg-slate-900 text-white flex items-center justify-between">
+        <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between bg-slate-50/70">
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-indigo-500/20 text-indigo-400 flex items-center justify-center border border-indigo-500/30">
+            <div className="w-8 h-8 rounded-lg bg-blue-600 text-white flex items-center justify-center shadow-xs">
               <Sparkles className="w-4 h-4" />
             </div>
             <div>
-              <h3 className="font-bold text-base leading-tight">Submit Service Request / Complaint</h3>
-              <p className="text-xs text-slate-400">Direct integration with Gemini AI Diagnostic Assistant</p>
+              <h2 className="text-lg font-bold text-slate-900">Submit Support Ticket</h2>
+              <p className="text-xs text-slate-500">Autonomous Gemini AI triage will analyze and assign SLA priority</p>
             </div>
           </div>
           <button
-            type="button"
             onClick={onClose}
-            className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+            className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 rounded-lg transition"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Form Body */}
-        <form onSubmit={handleSubmit} className="p-6 space-y-4 max-h-[80vh] overflow-y-auto">
-          
-          {/* Title */}
+        {/* Content */}
+        <form onSubmit={handleSubmit} className="p-6 space-y-4">
+          {error && (
+            <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+              <span>{error}</span>
+            </div>
+          )}
+
           <div>
-            <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-              Issue Title / Subject <span className="text-rose-500">*</span>
+            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 mb-1">
+              Issue Subject / Summary <span className="text-rose-500">*</span>
             </label>
             <input
               type="text"
               required
+              id="new-ticket-title-input"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              placeholder="e.g., 504 Gateway Timeout during CSV ingestion pipeline"
-              className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-hidden focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all text-slate-900 placeholder:text-slate-400 font-medium"
+              placeholder="e.g. Production 504 Gateway Timeout during customer checkout"
+              className="w-full px-3.5 py-2.5 text-sm rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-slate-900 placeholder:text-slate-400"
             />
           </div>
 
-          {/* Category & Priority Grid */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 mb-1">
                 Category
               </label>
               <select
+                id="new-ticket-category-select"
                 value={category}
                 onChange={(e) => setCategory(e.target.value as TicketCategory)}
-                className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-hidden focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all bg-white text-slate-800"
+                className="w-full px-3.5 py-2.5 text-sm rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-slate-900 bg-white"
               >
                 {CATEGORIES.map((cat) => (
                   <option key={cat} value={cat}>{cat}</option>
@@ -233,142 +230,124 @@ export const NewTicketModal: React.FC<NewTicketModalProps> = ({
             </div>
 
             <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                Priority
-              </label>
-              <select
-                value={priority}
-                onChange={(e) => setPriority(e.target.value as TicketPriority)}
-                className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-hidden focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all bg-white text-slate-800"
-              >
-                {PRIORITIES.map((p) => (
-                  <option key={p} value={p}>{p}</option>
-                ))}
-              </select>
-            </div>
-          </div>
-
-          {/* Detailed Description */}
-          <div>
-            <div className="flex items-center justify-between mb-1">
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
-                Detailed Problem Description <span className="text-rose-500">*</span>
+              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 mb-1">
+                AI Pre-Classification
               </label>
               <button
                 type="button"
-                onClick={handlePreDiagnose}
-                disabled={isDiagnosing || !title.trim() || !description.trim()}
-                className="inline-flex items-center gap-1 text-xs font-semibold text-indigo-600 hover:text-indigo-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                onClick={handleAiPreTriage}
+                disabled={isClassifying || !title || !description}
+                className="w-full px-3.5 py-2.5 text-xs font-semibold rounded-xl border border-indigo-200 bg-indigo-50/60 hover:bg-indigo-100 text-indigo-700 transition flex items-center justify-center gap-2 disabled:opacity-50"
               >
-                {isDiagnosing ? (
-                  <>
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    Analyzing with AI...
-                  </>
+                {isClassifying ? (
+                  <div className="w-3.5 h-3.5 border-2 border-indigo-600/30 border-t-indigo-600 rounded-full animate-spin" />
                 ) : (
-                  <>
-                    <Sparkles className="w-3.5 h-3.5 text-indigo-500" />
-                    Run AI Pre-Diagnosis
-                  </>
+                  <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
                 )}
+                <span>Auto-Detect Category & Priority</span>
               </button>
             </div>
-            <textarea
-              required
-              rows={4}
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="Describe what occurred, steps to reproduce, and impact on operations..."
-              className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-hidden focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all text-slate-900 placeholder:text-slate-400"
-            />
           </div>
 
-          {/* Optional System Environment */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1 flex items-center gap-1">
-                <Cpu className="w-3.5 h-3.5 text-slate-400" />
-                System Environment (Optional)
-              </label>
-              <input
-                type="text"
-                value={systemEnvironment}
-                onChange={(e) => setSystemEnvironment(e.target.value)}
-                placeholder="e.g. AWS EKS v1.28, Node 20, Safari 17"
-                className="w-full px-3.5 py-2 rounded-xl border border-slate-300 text-xs focus:outline-hidden focus:ring-2 focus:ring-indigo-500 text-slate-800"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1 flex items-center gap-1">
-                <Code className="w-3.5 h-3.5 text-slate-400" />
-                Error Logs / Error Code (Optional)
-              </label>
-              <input
-                type="text"
-                value={errorLogs}
-                onChange={(e) => setErrorLogs(e.target.value)}
-                placeholder="e.g. 504 Gateway Timeout or invalid_signature"
-                className="w-full px-3.5 py-2 rounded-xl border border-slate-300 text-xs font-mono focus:outline-hidden focus:ring-2 focus:ring-indigo-500 text-slate-800"
-              />
-            </div>
-          </div>
-
-          {/* AI Pre-Diagnosis Result Card (if triggered) */}
-          {preDiagnosis && (
-            <div className="p-4 rounded-xl bg-indigo-50/80 border border-indigo-100 text-slate-800 space-y-2.5 transition-all">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-1.5 text-xs font-bold text-indigo-900">
+          {/* AI Preview Result if triggered */}
+          {aiPreview && (
+            <div className="p-3.5 rounded-xl bg-indigo-50/80 border border-indigo-200/80 text-xs text-indigo-950 space-y-1.5">
+              <div className="flex items-center justify-between font-bold">
+                <span className="flex items-center gap-1.5">
                   <Sparkles className="w-4 h-4 text-indigo-600" />
-                  Gemini Diagnostic Insight ({preDiagnosis.confidenceScore}% Confidence)
-                </div>
-                <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-indigo-200 text-indigo-800">
-                  Auto-routed to {preDiagnosis.recommendedDepartment}
+                  Gemini Triage Recommendation
+                </span>
+                <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                  aiPreview.priority === 'Critical' ? 'bg-rose-100 text-rose-800' :
+                  aiPreview.priority === 'High' ? 'bg-amber-100 text-amber-800' : 'bg-blue-100 text-blue-800'
+                }`}>
+                  {aiPreview.priority} Priority (SLA: {aiPreview.slaHours}h)
                 </span>
               </div>
-              <p className="text-xs text-slate-700 font-medium leading-relaxed">
-                <strong>Likely Cause:</strong> {preDiagnosis.rootCauseHypothesis}
+              <p className="text-[11px] text-indigo-800">
+                <strong>Detected Category:</strong> {aiPreview.category}
               </p>
-              <div className="text-xs">
-                <span className="font-semibold text-indigo-950 block mb-1">Recommended Instant Fix:</span>
-                <ul className="list-disc pl-4 space-y-1 text-slate-600">
-                  {preDiagnosis.suggestedFixSteps.map((step, idx) => (
-                    <li key={idx}>{step}</li>
-                  ))}
-                </ul>
-              </div>
+              <p className="text-[11px] text-indigo-700/90 line-clamp-2">
+                <strong>Draft Response:</strong> {aiPreview.suggestedResponse}
+              </p>
             </div>
           )}
 
-          {/* Footer / Buttons */}
-          <div className="pt-4 border-t border-slate-200 flex items-center justify-end gap-3">
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 mb-1">
+              Detailed Description & Steps to Reproduce <span className="text-rose-500">*</span>
+            </label>
+            <textarea
+              required
+              rows={4}
+              id="new-ticket-desc-input"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="Provide exact details: error messages, timestamps, URLs, affected accounts, and any attempted workarounds..."
+              className="w-full px-3.5 py-2.5 text-sm rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-slate-900 placeholder:text-slate-400"
+            />
+          </div>
+
+          {/* Optional Attachment */}
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 mb-1">
+              Optional File / Screenshot Attachment
+            </label>
+            <div className="flex items-center gap-3">
+              <label className="cursor-pointer px-4 py-2 border border-slate-300 rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-medium flex items-center gap-2 transition">
+                <Upload className="w-3.5 h-3.5 text-slate-500" />
+                <span>Choose File</span>
+                <input 
+                  type="file" 
+                  onChange={handleFileUpload} 
+                  className="hidden" 
+                  accept="image/*,.pdf,.txt,.log,.json" 
+                />
+              </label>
+              {fileAttachment && (
+                <div className="flex items-center gap-2 text-xs text-slate-700 bg-blue-50 px-3 py-1.5 rounded-lg border border-blue-200">
+                  <FileText className="w-3.5 h-3.5 text-blue-600" />
+                  <span className="truncate max-w-[200px]">{fileAttachment.name}</span>
+                  <button 
+                    type="button" 
+                    onClick={() => setFileAttachment(null)}
+                    className="text-slate-400 hover:text-rose-600"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Action buttons */}
+          <div className="pt-3 border-t border-slate-200 flex items-center justify-end gap-2.5">
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 text-xs font-semibold text-slate-600 hover:text-slate-900 rounded-xl hover:bg-slate-100 transition-colors"
+              className="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 hover:bg-slate-100 rounded-xl transition"
             >
               Cancel
             </button>
             <button
               type="submit"
-              id="submit-ticket-form-btn"
-              disabled={isSubmitting || !title.trim() || !description.trim()}
-              className="inline-flex items-center gap-2 px-5 py-2.5 text-xs sm:text-sm font-semibold rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm transition-all"
+              disabled={isSubmitting}
+              id="submit-ticket-confirm-btn"
+              className="px-5 py-2.5 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-xl transition shadow-sm hover:shadow flex items-center gap-2 disabled:opacity-50"
             >
               {isSubmitting ? (
                 <>
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  Lodging & AI Diagnosing...
+                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  <span>Submitting & Triaging with AI...</span>
                 </>
               ) : (
                 <>
                   <Send className="w-4 h-4" />
-                  Submit Service Request
+                  <span>Submit Ticket</span>
                 </>
               )}
             </button>
           </div>
-
         </form>
       </div>
     </div>

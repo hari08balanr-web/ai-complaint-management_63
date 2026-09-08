@@ -1,17 +1,94 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /tickets/{ticketId} {
-      allow read, write: if true;
+
+    function isSignedIn() {
+      return request.auth != null;
     }
-    match /users/{userId} {
-      allow read, write: if true;
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
     }
-    match /activity/{activityId} {
-      allow read, write: if true;
+
+    function isAgentOrAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == 'hari08balanr@gmail.com' ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         (getUserData().role == 'agent' || getUserData().role == 'admin'))
+      );
     }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == 'hari08balanr@gmail.com' ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         getUserData().role == 'admin')
+      );
+    }
+
+    // Default deny
     match /{document=**} {
-      allow read, write: if true;
+      allow read, write: if false;
+    }
+
+    // Connection test document
+    match /test/connection {
+      allow read: if true;
+    }
+
+    // Users collection
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+    }
+
+    // Tickets collection
+    match /tickets/{ticketId} {
+      allow read: if isSignedIn() && (
+        isAgentOrAdmin() ||
+        resource.data.userId == request.auth.uid
+      );
+
+      allow create: if isSignedIn() && (
+        request.resource.data.userId == request.auth.uid || isAgentOrAdmin()
+      );
+
+      allow update: if isSignedIn() && (
+        isAgentOrAdmin() ||
+        resource.data.userId == request.auth.uid
+      );
+
+      allow delete: if isAdmin();
+
+      // Messages subcollection
+      match /messages/{messageId} {
+        allow read: if isSignedIn() && (
+          isAgentOrAdmin() ||
+          get(/databases/$(database)/documents/tickets/$(ticketId)).data.userId == request.auth.uid
+        );
+
+        allow create: if isSignedIn() && (
+          isAgentOrAdmin() ||
+          get(/databases/$(database)/documents/tickets/$(ticketId)).data.userId == request.auth.uid
+        );
+
+        allow update, delete: if isAgentOrAdmin();
+      }
+
+      // EscalationLog subcollection
+      match /escalationLog/{logId} {
+        allow read: if isSignedIn() && (
+          isAgentOrAdmin() ||
+          get(/databases/$(database)/documents/tickets/$(ticketId)).data.userId == request.auth.uid
+        );
+
+        allow create: if isSignedIn() && (
+          isAgentOrAdmin() ||
+          get(/databases/$(database)/documents/tickets/$(ticketId)).data.userId == request.auth.uid
+        );
+
+        allow update, delete: if isAgentOrAdmin();
+      }
     }
   }
 }

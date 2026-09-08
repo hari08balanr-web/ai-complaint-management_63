@@ -1,0 +1,85 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile with role-based access",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "role": { "type": "string", "enum": ["user", "agent", "admin"] },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["name", "email", "role"]
+    },
+    "Ticket": {
+      "title": "Ticket",
+      "description": "Support service request or complaint ticket",
+      "type": "object",
+      "properties": {
+        "ticketId": { "type": "string" },
+        "userId": { "type": "string" },
+        "requesterName": { "type": "string" },
+        "requesterEmail": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "category": { "type": "string" },
+        "priority": { "type": "string", "enum": ["Low", "Medium", "High", "Critical"] },
+        "status": { "type": "string", "enum": ["Open", "In Progress", "Escalated", "Resolved", "Closed"] },
+        "assignedAgentId": { "type": "string" },
+        "assignedAgentName": { "type": "string" },
+        "slaDeadline": { "type": "number" },
+        "escalationLevel": { "type": "number" },
+        "attachmentUrl": { "type": "string" },
+        "attachmentName": { "type": "string" },
+        "createdAt": { "type": "number" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["ticketId", "userId", "title", "description", "category", "priority", "status", "slaDeadline", "escalationLevel"]
+    },
+    "Message": {
+      "title": "Message",
+      "description": "Thread message for a ticket",
+      "type": "object",
+      "properties": {
+        "senderId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "senderType": { "type": "string", "enum": ["user", "agent", "AI"] },
+        "content": { "type": "string" },
+        "timestamp": { "type": "number" }
+      },
+      "required": ["senderId", "senderType", "content", "timestamp"]
+    },
+    "EscalationLog": {
+      "title": "EscalationLog",
+      "description": "Audit record of ticket tier escalation",
+      "type": "object",
+      "properties": {
+        "fromLevel": { "type": "number" },
+        "toLevel": { "type": "number" },
+        "reason": { "type": "string" },
+        "triggeredBy": { "type": "string" },
+        "timestamp": { "type": "number" }
+      },
+      "required": ["fromLevel", "toLevel", "reason", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "User accounts with system roles"
+    },
+    "/tickets/{ticketId}": {
+      "schema": { "$ref": "#/entities/Ticket" },
+      "description": "Service tickets and complaints"
+    },
+    "/tickets/{ticketId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/Message" },
+      "description": "Messages exchanged in ticket thread"
+    },
+    "/tickets/{ticketId}/escalationLog/{logId}": {
+      "schema": { "$ref": "#/entities/EscalationLog" },
+      "description": "Escalation log events"
+    }
+  }
+}

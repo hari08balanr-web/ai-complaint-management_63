@@ -17,7 +17,14 @@ function getGeminiClient(): GoogleGenAI | null {
   if (!apiKey || apiKey === 'MY_GEMINI_API_KEY' || apiKey.trim() === '') {
     return null;
   }
-  return new GoogleGenAI({ apiKey });
+  return new GoogleGenAI({
+    apiKey,
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      },
+    },
+  });
 }
 
 // Health check
@@ -107,6 +114,119 @@ function generateFallbackDiagnosis(data: {
   };
 }
 
+// Required Endpoint: Classify Ticket via Gemini API
+app.post('/api/tickets/classify', async (req: Request, res: Response) => {
+  try {
+    const { title, description } = req.body;
+    if (!title || !description) {
+      return res.status(400).json({ error: 'Title and description are required' });
+    }
+
+    const ai = getGeminiClient();
+    if (!ai) {
+      // Fallback classification if Gemini API key not provided or unavailable
+      const text = `${title} ${description}`.toLowerCase();
+      let category = 'Software Bug';
+      let priority: 'Low' | 'Medium' | 'High' | 'Critical' = 'Medium';
+      let slaHours = 24;
+
+      if (text.includes('down') || text.includes('critical') || text.includes('504') || text.includes('crash') || text.includes('outage') || text.includes('urgent')) {
+        category = 'Cloud & Infrastructure';
+        priority = 'Critical';
+        slaHours = 1;
+      } else if (text.includes('sso') || text.includes('security') || text.includes('login') || text.includes('auth') || text.includes('token') || text.includes('permission')) {
+        category = 'Account & Authentication';
+        priority = 'High';
+        slaHours = 4;
+      } else if (text.includes('billing') || text.includes('invoice') || text.includes('charge') || text.includes('refund') || text.includes('payment')) {
+        category = 'Billing & Invoicing';
+        priority = 'Medium';
+        slaHours = 24;
+      } else if (text.includes('slow') || text.includes('latency') || text.includes('lag') || text.includes('cpu') || text.includes('timeout')) {
+        category = 'Performance & Latency';
+        priority = 'High';
+        slaHours = 4;
+      } else if (text.includes('complaint') || text.includes('service') || text.includes('unhappy') || text.includes('delay')) {
+        category = 'Service Complaint';
+        priority = 'Medium';
+        slaHours = 24;
+      }
+
+      const suggestedResponse = `Hello, thank you for submitting your service request regarding "${title}".\n\nBased on the automated triage analysis, this issue has been categorized under **${category}** with **${priority}** priority (Target SLA response window: within ${slaHours} hour${slaHours > 1 ? 's' : ''}).\n\n**Next Steps:**\n1. Our automated diagnostics have logged your issue.\n2. If you have relevant error messages, screenshots, or steps to reproduce, please reply directly in this thread.\n3. An engineer will follow up if self-service resolution is not achieved.\n\nBest regards,\nResolveDesk AI Assistant`;
+
+      return res.json({
+        category,
+        priority,
+        suggestedResponse,
+        slaHours
+      });
+    }
+
+    const prompt = `You are a Senior Technical Support Dispatcher and Incident Response Specialist.
+Analyze the following service request / complaint:
+Title: ${title}
+Description: ${description}
+
+Classify the issue and return ONLY a valid JSON object with the following schema:
+{
+  "category": (One of: "Software Bug", "Network & Connectivity", "Cloud & Infrastructure", "Account & Authentication", "Billing & Invoicing", "Performance & Latency", "Hardware Issue", "Service Complaint"),
+  "priority": (One of: "Low", "Medium", "High", "Critical"),
+  "slaHours": (integer: 1 for Critical, 4 for High, 24 for Medium, 48 for Low),
+  "suggestedResponse": "A professional, empathetic, and technically actionable first response from the AI Assistant directly to the requester. Explain understanding of the issue, offer 1-3 immediate troubleshooting steps or checks, and state that the ticket is queued for support."
+}`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.8-flash',
+      contents: prompt,
+      config: {
+        responseMimeType: 'application/json',
+        temperature: 0.2
+      }
+    });
+
+    const parsed = JSON.parse(response.text || '{}');
+    const validPriorities = ['Low', 'Medium', 'High', 'Critical'];
+    const priority = validPriorities.includes(parsed.priority) ? parsed.priority : 'Medium';
+    const slaHoursMap: Record<string, number> = { Critical: 1, High: 4, Medium: 24, Low: 48 };
+
+    return res.json({
+      category: parsed.category || 'Software Bug',
+      priority,
+      suggestedResponse: parsed.suggestedResponse || `Thank you for reaching out regarding "${title}". We have received your request and an engineer will review it shortly.`,
+      slaHours: parsed.slaHours || slaHoursMap[priority] || 24
+    });
+  } catch (err: unknown) {
+    console.error('API Error /api/tickets/classify:', err);
+    res.status(500).json({ error: 'Failed to classify ticket' });
+  }
+});
+
+// Endpoint: Escalation Engine SLA Evaluator
+app.post('/api/tickets/check-escalations', (req: Request, res: Response) => {
+  try {
+    const { tickets } = req.body;
+    const now = Date.now();
+    const breachedTicketIds: string[] = [];
+
+    if (Array.isArray(tickets)) {
+      for (const t of tickets) {
+        if ((t.status === 'Open' || t.status === 'In Progress') && t.slaDeadline && t.slaDeadline < now) {
+          breachedTicketIds.push(t.id);
+        }
+      }
+    }
+
+    return res.json({
+      timestamp: now,
+      evaluatedCount: Array.isArray(tickets) ? tickets.length : 0,
+      breachedTicketIds,
+      breachedCount: breachedTicketIds.length,
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to evaluate escalations' });
+  }
+});
+
 // 1. Endpoint: AI Diagnose Ticket
 app.post('/api/ai/diagnose', async (req: Request, res: Response) => {
   try {
@@ -151,7 +271,7 @@ Provide an accurate, deep technical diagnosis and return ONLY a valid JSON objec
 
     try {
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.8-flash',
         contents: prompt,
         config: {
           responseMimeType: 'application/json',
@@ -213,7 +333,7 @@ ${currentTicketContext ? `\nActive Ticket Context:\nTitle: ${currentTicketContex
       }));
 
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.8-flash',
         contents: conversationHistory,
         config: {
           systemInstruction,
@@ -269,7 +389,7 @@ Return as plain text with bold headings.`;
 
     try {
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.8-flash',
         contents: prompt,
         config: { temperature: 0.3 }
       });
@@ -309,7 +429,7 @@ Tone: ${agentTone}
 Draft only the message body to be sent to the customer.`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.8-flash',
       contents: prompt,
       config: { temperature: 0.4 }
     });

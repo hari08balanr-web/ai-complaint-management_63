@@ -1,22 +1,16 @@
-export type TicketStatus = 
-  | 'New'
-  | 'AI Diagnostics'
-  | 'In Progress'
-  | 'Awaiting User'
-  | 'Escalated'
-  | 'Resolved'
-  | 'Closed';
+export type UserRole = 'user' | 'agent' | 'admin';
 
-export type ActiveView = 
-  | 'dashboard'
-  | 'tickets'
-  | 'escalations'
-  | 'diagnostics'
-  | 'chat'
-  | 'complaints'
-  | 'knowledge';
+export interface AppUser {
+  uid: string;
+  name: string;
+  email: string;
+  role: UserRole;
+  createdAt: string;
+}
 
 export type TicketPriority = 'Low' | 'Medium' | 'High' | 'Critical';
+
+export type TicketStatus = 'Open' | 'In Progress' | 'Escalated' | 'Resolved' | 'Closed';
 
 export type TicketCategory =
   | 'Software Bug'
@@ -28,72 +22,52 @@ export type TicketCategory =
   | 'Hardware Issue'
   | 'Service Complaint';
 
-export interface TicketMessage {
-  id: string;
-  sender: 'user' | 'ai' | 'agent';
-  senderName: string;
-  avatar?: string;
-  timestamp: string;
-  text: string;
-  isSolutionProposal?: boolean;
-}
-
-export interface AiDiagnosticAnalysis {
-  summary: string;
-  rootCauseHypothesis: string;
-  suggestedFixSteps: string[];
-  severityScore: number; // 1 - 10
-  detectedCategory: TicketCategory;
-  suggestedPriority: TicketPriority;
-  recommendedDepartment: string;
-  estimatedResolutionMinutes: number;
-  confidenceScore: number; // 0 - 100%
-  tags: string[];
-}
-
-export interface EscalationInfo {
-  isEscalated: boolean;
-  escalatedAt?: string;
-  escalatedBy?: string;
-  escalationReason?: string;
-  assignedTeam?: string;
-  assignedAgent?: string;
-  aiHandoverSummary?: string;
-  slaTargetHours?: number;
-  internalNotes?: string[];
-}
-
-export interface ServiceTicket {
-  id: string;
-  ticketNumber: string; // e.g., "SR-1042"
-  title: string;
-  description: string;
-  category: TicketCategory;
-  priority: TicketPriority;
-  status: TicketStatus;
-  requesterId: string;
+export interface Ticket {
+  id: string; // Firestore document ID
+  ticketId: string; // Formatted ID e.g. "TSC-2026-4891"
+  userId: string;
   requesterName: string;
   requesterEmail: string;
-  systemEnvironment?: string; // e.g. "Ubuntu 22.04 / Node.js 20 / Chrome 124"
-  errorLogs?: string;
-  createdAt: string;
-  updatedAt: string;
-  aiAnalysis?: AiDiagnosticAnalysis;
-  escalation: EscalationInfo;
-  messages: TicketMessage[];
+  title: string;
+  description: string;
+  category: string;
+  priority: TicketPriority;
+  status: TicketStatus;
+  assignedAgentId?: string | null;
+  assignedAgentName?: string | null;
+  slaDeadline: number; // epoch ms
+  escalationLevel: number; // 0, 1, 2, 3
+  attachmentUrl?: string | null;
+  attachmentName?: string | null;
+  createdAt: number; // epoch ms
+  updatedAt: number; // epoch ms
 }
 
-export interface UserProfile {
-  uid: string;
-  displayName: string;
-  email: string;
-  photoURL?: string;
-  role: 'customer' | 'support_agent';
-}
-
-export interface ChatMessage {
+export interface TicketMessage {
   id: string;
-  role: 'user' | 'model' | 'system';
+  senderId: string;
+  senderName: string;
+  senderType: 'user' | 'agent' | 'AI';
   content: string;
-  timestamp: string;
+  timestamp: number;
 }
+
+export interface EscalationLogEntry {
+  id: string;
+  fromLevel: number;
+  toLevel: number;
+  reason: string;
+  triggeredBy: string;
+  timestamp: number;
+}
+
+export interface ToastNotification {
+  id: string;
+  title: string;
+  message: string;
+  type: 'info' | 'success' | 'warning' | 'error';
+  ticketId?: string;
+  timestamp: number;
+}
+
+export type ActiveNavTab = 'tickets' | 'new-ticket' | 'queue' | 'agents' | 'analytics' | 'faq';

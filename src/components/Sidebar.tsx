@@ -1,317 +1,260 @@
 import React from 'react';
+import { AppUser, ActiveNavTab, Ticket } from '../types';
 import { 
-  LayoutDashboard, 
-  Ticket, 
-  AlertTriangle, 
-  Cpu, 
-  MessageSquareCode, 
-  ShieldAlert, 
-  BookOpen, 
-  Sparkles, 
   PlusCircle, 
-  User as UserIcon, 
-  ShieldCheck, 
-  LogOut, 
-  LogIn, 
-  ChevronRight, 
-  RefreshCw,
-  CheckCircle2,
-  Activity,
+  Inbox, 
+  UserCheck, 
+  AlertTriangle, 
+  CheckCircle, 
+  BarChart3, 
+  Users, 
+  BookOpen, 
+  Clock,
   Layers
 } from 'lucide-react';
-import { ActiveView, ServiceTicket } from '../types';
-import { User, loginWithGoogle, logOut } from '../lib/firebase';
 
 interface SidebarProps {
-  activeView: ActiveView;
-  setActiveView: (view: ActiveView) => void;
-  role: 'customer' | 'support_agent';
-  setRole: (role: 'customer' | 'support_agent') => void;
-  tickets: ServiceTicket[];
-  user: User | null;
+  currentUser: AppUser | null;
+  activeTab: ActiveNavTab;
+  onSelectTab: (tab: ActiveNavTab) => void;
   onOpenNewTicket: () => void;
-  onResetData: () => void;
-  isMobileOpen: boolean;
-  setIsMobileOpen: (open: boolean) => void;
+  tickets: Ticket[];
+  selectedStatusFilter: string | null;
+  onSelectStatusFilter: (status: string | null) => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
-  activeView,
-  setActiveView,
-  role,
-  setRole,
-  tickets,
-  user,
+  currentUser,
+  activeTab,
+  onSelectTab,
   onOpenNewTicket,
-  onResetData,
-  isMobileOpen,
-  setIsMobileOpen
+  tickets,
+  selectedStatusFilter,
+  onSelectStatusFilter
 }) => {
-  // Counts
-  const totalTickets = tickets.length;
-  const escalatedCount = tickets.filter(t => t.status === 'Escalated' || t.escalation?.isEscalated).length;
-  const criticalCount = tickets.filter(t => t.priority === 'Critical' && t.status !== 'Resolved' && t.status !== 'Closed').length;
-  const complaintsCount = tickets.filter(t => t.category === 'Service Complaint' || t.category === 'Billing & Invoicing').length;
+  const role = currentUser?.role || 'user';
 
-  const navItems = [
-    {
-      group: 'Core Operations',
-      items: [
-        {
-          id: 'dashboard' as ActiveView,
-          label: 'Executive Dashboard',
-          icon: LayoutDashboard,
-          badge: null
-        },
-        {
-          id: 'tickets' as ActiveView,
-          label: 'Service Desk & Tickets',
-          icon: Ticket,
-          badge: totalTickets > 0 ? String(totalTickets) : null,
-          badgeColor: 'bg-slate-700 text-slate-200'
-        },
-        {
-          id: 'escalations' as ActiveView,
-          label: 'Tier 2 Escalations',
-          icon: AlertTriangle,
-          badge: escalatedCount > 0 ? String(escalatedCount) : null,
-          badgeColor: 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
-        }
-      ]
-    },
-    {
-      group: 'AI Intelligence & Triage',
-      items: [
-        {
-          id: 'diagnostics' as ActiveView,
-          label: 'AI Diagnostics Hub',
-          icon: Cpu,
-          badge: 'Gemini',
-          badgeColor: 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
-        },
-        {
-          id: 'chat' as ActiveView,
-          label: 'AI Troubleshooter',
-          icon: MessageSquareCode,
-          badge: 'Live',
-          badgeColor: 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-        }
-      ]
-    },
-    {
-      group: 'Quality & Runbooks',
-      items: [
-        {
-          id: 'complaints' as ActiveView,
-          label: 'Complaints & SLA Monitor',
-          icon: ShieldAlert,
-          badge: complaintsCount > 0 ? String(complaintsCount) : null,
-          badgeColor: 'bg-amber-500/20 text-amber-300'
-        },
-        {
-          id: 'knowledge' as ActiveView,
-          label: 'Knowledge & Runbooks',
-          icon: BookOpen,
-          badge: null
-        }
-      ]
-    }
-  ];
+  // Compute status counts
+  const openCount = tickets.filter(t => t.status === 'Open').length;
+  const inProgressCount = tickets.filter(t => t.status === 'In Progress').length;
+  const escalatedCount = tickets.filter(t => t.status === 'Escalated').length;
+  const resolvedCount = tickets.filter(t => t.status === 'Resolved' || t.status === 'Closed').length;
 
-  const handleNavClick = (view: ActiveView) => {
-    setActiveView(view);
-    setIsMobileOpen(false);
-  };
+  const assignedToMeCount = currentUser 
+    ? tickets.filter(t => t.assignedAgentId === currentUser.uid && t.status !== 'Resolved' && t.status !== 'Closed').length 
+    : 0;
 
   return (
-    <>
-      {/* Mobile Backdrop */}
-      {isMobileOpen && (
-        <div 
-          className="fixed inset-0 bg-slate-950/70 backdrop-blur-xs z-40 lg:hidden"
-          onClick={() => setIsMobileOpen(false)}
-        />
-      )}
+    <aside className="w-64 bg-slate-900 text-slate-300 flex flex-col shrink-0 border-r border-slate-800 select-none">
+      {/* Primary Action Button */}
+      <div className="p-4 border-b border-slate-800">
+        <button
+          onClick={onOpenNewTicket}
+          id="sidebar-new-ticket-btn"
+          className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-sm transition shadow-sm hover:shadow flex items-center justify-center gap-2"
+        >
+          <PlusCircle className="w-4 h-4" />
+          <span>New Ticket</span>
+        </button>
+      </div>
 
-      {/* Main Sidebar Panel */}
-      <aside
-        className={`fixed top-0 bottom-0 left-0 z-50 w-72 bg-slate-900 border-r border-slate-800/90 text-slate-300 flex flex-col transition-transform duration-300 ease-in-out lg:translate-x-0 ${
-          isMobileOpen ? 'translate-x-0' : '-translate-x-full'
-        }`}
-      >
-        {/* Brand Header */}
-        <div className="p-5 border-b border-slate-800 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 via-indigo-500 to-cyan-500 flex items-center justify-center text-white shadow-lg shadow-indigo-600/30 ring-1 ring-white/20">
-              <Layers className="w-5 h-5" />
-            </div>
-            <div>
-              <div className="flex items-center gap-1.5">
-                <span className="font-extrabold text-base tracking-tight text-white">
-                  Nexus<span className="text-indigo-400">Desk</span>
-                </span>
-                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                  PRO
-                </span>
-              </div>
-              <p className="text-[11px] text-slate-400 font-medium">
-                AI Service Desk & Triage
-              </p>
-            </div>
+      {/* Navigation Links */}
+      <div className="flex-1 overflow-y-auto p-3 space-y-6">
+        {/* Main Views */}
+        <div>
+          <div className="px-3 pb-2 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+            {role === 'admin' ? 'Administration' : role === 'agent' ? 'Support Desk' : 'Service Portal'}
           </div>
 
-          <div className="flex items-center gap-1.5">
-            <span className="relative flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-            </span>
-          </div>
-        </div>
+          <nav className="space-y-1">
+            {/* User View */}
+            {role === 'user' && (
+              <>
+                <button
+                  onClick={() => { onSelectTab('tickets'); onSelectStatusFilter(null); }}
+                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-sm font-medium transition ${
+                    activeTab === 'tickets' && !selectedStatusFilter
+                      ? 'bg-slate-800 text-white font-semibold shadow-xs'
+                      : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5">
+                    <Inbox className="w-4 h-4 text-blue-400" />
+                    <span>My Tickets</span>
+                  </div>
+                  <span className="px-2 py-0.5 text-xs font-semibold rounded-full bg-slate-800 text-slate-300">
+                    {tickets.length}
+                  </span>
+                </button>
+              </>
+            )}
 
-        {/* Quick Action Button */}
-        <div className="p-4 pb-2">
-          <button
-            type="button"
-            onClick={() => {
-              onOpenNewTicket();
-              setIsMobileOpen(false);
-            }}
-            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 to-indigo-700 hover:from-indigo-500 hover:to-indigo-600 text-white font-semibold text-xs shadow-md shadow-indigo-700/25 transition-all hover:scale-[1.01] active:scale-[0.99]"
-          >
-            <PlusCircle className="w-4 h-4" />
-            <span>Create New Ticket</span>
-          </button>
-        </div>
+            {/* Agent Views */}
+            {role === 'agent' && (
+              <>
+                <button
+                  onClick={() => { onSelectTab('queue'); onSelectStatusFilter(null); }}
+                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-sm font-medium transition ${
+                    activeTab === 'queue' && !selectedStatusFilter
+                      ? 'bg-slate-800 text-white font-semibold shadow-xs'
+                      : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5">
+                    <Layers className="w-4 h-4 text-blue-400" />
+                    <span>All Open Queue</span>
+                  </div>
+                  <span className="px-2 py-0.5 text-xs font-semibold rounded-full bg-blue-900/60 text-blue-300">
+                    {openCount + inProgressCount + escalatedCount}
+                  </span>
+                </button>
 
-        {/* Navigation Sections */}
-        <nav className="flex-1 px-3 py-2 overflow-y-auto space-y-6">
-          {navItems.map((section, idx) => (
-            <div key={idx} className="space-y-1">
-              <p className="px-3 text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                {section.group}
-              </p>
-              <div className="space-y-0.5">
-                {section.items.map((item) => {
-                  const Icon = item.icon;
-                  const isActive = activeView === item.id;
-                  return (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => handleNavClick(item.id)}
-                      className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition-all group ${
-                        isActive
-                          ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-600/30'
-                          : 'text-slate-300 hover:text-white hover:bg-slate-800/80'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2.5 truncate">
-                        <Icon className={`w-4 h-4 transition-colors ${
-                          isActive ? 'text-white' : 'text-slate-400 group-hover:text-indigo-400'
-                        }`} />
-                        <span className="truncate">{item.label}</span>
-                      </div>
+                <button
+                  onClick={() => { onSelectTab('tickets'); onSelectStatusFilter('assigned-me'); }}
+                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-sm font-medium transition ${
+                    selectedStatusFilter === 'assigned-me'
+                      ? 'bg-slate-800 text-white font-semibold shadow-xs'
+                      : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5">
+                    <UserCheck className="w-4 h-4 text-emerald-400" />
+                    <span>Assigned to Me</span>
+                  </div>
+                  <span className="px-2 py-0.5 text-xs font-semibold rounded-full bg-slate-800 text-slate-300">
+                    {assignedToMeCount}
+                  </span>
+                </button>
+              </>
+            )}
 
-                      {item.badge && (
-                        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-md ${item.badgeColor || 'bg-slate-800 text-slate-300'}`}>
-                          {item.badge}
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          ))}
-        </nav>
+            {/* Admin Views */}
+            {role === 'admin' && (
+              <>
+                <button
+                  onClick={() => { onSelectTab('tickets'); onSelectStatusFilter(null); }}
+                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-sm font-medium transition ${
+                    activeTab === 'tickets' && !selectedStatusFilter
+                      ? 'bg-slate-800 text-white font-semibold shadow-xs'
+                      : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5">
+                    <Inbox className="w-4 h-4 text-blue-400" />
+                    <span>All Enterprise Tickets</span>
+                  </div>
+                  <span className="px-2 py-0.5 text-xs font-semibold rounded-full bg-slate-800 text-slate-300">
+                    {tickets.length}
+                  </span>
+                </button>
 
-        {/* Perspective & Role Switcher */}
-        <div className="p-3 border-t border-slate-800/90 bg-slate-950/40">
-          <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400 px-1 mb-2 flex items-center justify-between">
-            <span>Workspace View</span>
-            <span className="text-[10px] font-normal text-slate-400 capitalize">{role.replace('_', ' ')}</span>
-          </div>
-          <div className="grid grid-cols-2 gap-1 bg-slate-800/90 p-1 rounded-xl border border-slate-700/60">
+                <button
+                  onClick={() => onSelectTab('agents')}
+                  className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm font-medium transition ${
+                    activeTab === 'agents'
+                      ? 'bg-slate-800 text-white font-semibold shadow-xs'
+                      : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
+                  }`}
+                >
+                  <Users className="w-4 h-4 text-purple-400" />
+                  <span>Agent Management</span>
+                </button>
+
+                <button
+                  onClick={() => onSelectTab('analytics')}
+                  className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm font-medium transition ${
+                    activeTab === 'analytics'
+                      ? 'bg-slate-800 text-white font-semibold shadow-xs'
+                      : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
+                  }`}
+                >
+                  <BarChart3 className="w-4 h-4 text-emerald-400" />
+                  <span>SLA & Escalations</span>
+                </button>
+              </>
+            )}
+
+            {/* FAQ / Knowledge Guide */}
             <button
-              type="button"
-              onClick={() => setRole('customer')}
-              className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-xs font-semibold transition-all ${
-                role === 'customer'
-                  ? 'bg-indigo-600 text-white shadow-xs'
-                  : 'text-slate-300 hover:text-white'
+              onClick={() => onSelectTab('faq')}
+              className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm font-medium transition ${
+                activeTab === 'faq'
+                  ? 'bg-slate-800 text-white font-semibold shadow-xs'
+                  : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
               }`}
             >
-              <UserIcon className="w-3 h-3" />
-              <span>User</span>
+              <BookOpen className="w-4 h-4 text-amber-400" />
+              <span>SLA & Escalation Policy</span>
             </button>
+          </nav>
+        </div>
+
+        {/* Live Filter Section */}
+        <div>
+          <div className="px-3 pb-2 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+            Quick Status Filters
+          </div>
+          <div className="space-y-1">
             <button
-              type="button"
-              onClick={() => setRole('support_agent')}
-              className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-xs font-semibold transition-all ${
-                role === 'support_agent'
-                  ? 'bg-indigo-600 text-white shadow-xs'
-                  : 'text-slate-300 hover:text-white'
+              onClick={() => { onSelectTab('tickets'); onSelectStatusFilter('Open'); }}
+              className={`w-full flex items-center justify-between px-3 py-1.5 rounded-lg text-xs font-medium transition ${
+                selectedStatusFilter === 'Open' ? 'bg-blue-900/50 text-blue-300 font-semibold' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/40'
               }`}
             >
-              <ShieldCheck className="w-3 h-3" />
-              <span>Agent</span>
+              <div className="flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-blue-500" />
+                <span>Open / New</span>
+              </div>
+              <span>{openCount}</span>
+            </button>
+
+            <button
+              onClick={() => { onSelectTab('tickets'); onSelectStatusFilter('In Progress'); }}
+              className={`w-full flex items-center justify-between px-3 py-1.5 rounded-lg text-xs font-medium transition ${
+                selectedStatusFilter === 'In Progress' ? 'bg-amber-900/50 text-amber-300 font-semibold' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/40'
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-amber-500" />
+                <span>In Progress</span>
+              </div>
+              <span>{inProgressCount}</span>
+            </button>
+
+            <button
+              onClick={() => { onSelectTab('tickets'); onSelectStatusFilter('Escalated'); }}
+              className={`w-full flex items-center justify-between px-3 py-1.5 rounded-lg text-xs font-medium transition ${
+                selectedStatusFilter === 'Escalated' ? 'bg-rose-900/50 text-rose-300 font-semibold' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/40'
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-3 h-3 text-rose-400" />
+                <span>Escalated (Tier 1-3)</span>
+              </div>
+              <span className="font-bold text-rose-400">{escalatedCount}</span>
+            </button>
+
+            <button
+              onClick={() => { onSelectTab('tickets'); onSelectStatusFilter('Resolved'); }}
+              className={`w-full flex items-center justify-between px-3 py-1.5 rounded-lg text-xs font-medium transition ${
+                selectedStatusFilter === 'Resolved' ? 'bg-emerald-900/50 text-emerald-300 font-semibold' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/40'
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <CheckCircle className="w-3 h-3 text-emerald-400" />
+                <span>Resolved & Closed</span>
+              </div>
+              <span>{resolvedCount}</span>
             </button>
           </div>
         </div>
+      </div>
 
-        {/* User Account & System Status Footer */}
-        <div className="p-3 border-t border-slate-800/90 flex items-center justify-between gap-2">
-          {user ? (
-            <div className="flex items-center gap-2.5 min-w-0 flex-1">
-              <div className="w-8 h-8 rounded-lg bg-indigo-500/20 text-indigo-300 flex items-center justify-center font-bold text-xs ring-1 ring-indigo-500/30 shrink-0 overflow-hidden">
-                {user.photoURL ? (
-                  <img src={user.photoURL} alt="Avatar" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
-                ) : (
-                  (user.displayName?.[0] || user.email?.[0] || 'U').toUpperCase()
-                )}
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="text-xs font-bold text-white truncate">
-                  {user.displayName || user.email?.split('@')[0] || 'Enterprise User'}
-                </p>
-                <p className="text-[10px] text-slate-400 truncate">
-                  {user.email || 'user@organization.internal'}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => logOut()}
-                className="p-1.5 text-slate-400 hover:text-rose-400 hover:bg-slate-800 rounded-lg transition-colors"
-                title="Sign out of enterprise session"
-              >
-                <LogOut className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          ) : (
-            <div className="flex items-center justify-between w-full">
-              <button
-                type="button"
-                onClick={() => loginWithGoogle()}
-                className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg bg-indigo-600 text-white hover:bg-indigo-500 transition-colors"
-                title="Sign in with Google Workspace"
-              >
-                <LogIn className="w-3.5 h-3.5" />
-                <span>Enterprise Sign In</span>
-              </button>
-            </div>
-          )}
-
-          {/* Sync Workspace Data button */}
-          <button
-            type="button"
-            onClick={onResetData}
-            className="p-1.5 text-slate-400 hover:text-indigo-300 hover:bg-slate-800 rounded-lg transition-colors shrink-0"
-            title="Sync Workspace Data"
-          >
-            <RefreshCw className="w-3.5 h-3.5" />
-          </button>
-        </div>
-      </aside>
-    </>
+      {/* Footer SLA Info */}
+      <div className="p-3 border-t border-slate-800 bg-slate-950/40 text-[11px] text-slate-400 flex items-center gap-2">
+        <Clock className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+        <span>SLA Auto-Checker: Active (Every 30s)</span>
+      </div>
+    </aside>
   );
 };

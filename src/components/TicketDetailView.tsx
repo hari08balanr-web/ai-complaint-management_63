@@ -1,654 +1,489 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { Ticket, AuthUser } from '../types';
+import { apiGetTicket, apiPostTicketMessage, apiAskAiReply, apiResolveTicket } from '../lib/api';
+import { getSocket, joinTicketRoom, leaveTicketRoom } from '../lib/socket';
 import { 
-  Ticket, 
-  TicketMessage, 
-  EscalationLogEntry, 
-  AppUser, 
-  TicketStatus 
-} from '../types';
-import { 
-  subscribeToTicket, 
-  subscribeToTicketMessages, 
-  subscribeToEscalationLogs, 
-  addTicketMessage, 
-  updateTicketStatus, 
-  assignTicketAgent 
-} from '../lib/firebase';
-import { 
+  ArrowLeft, 
+  Sparkles, 
   Clock, 
   AlertTriangle, 
   CheckCircle2, 
   Send, 
-  Sparkles, 
-  User, 
-  Bot, 
-  ShieldAlert, 
   Paperclip, 
-  ArrowLeft, 
-  UserCheck, 
-  ChevronRight,
-  History,
-  FileText
+  AlertOctagon, 
+  Calendar, 
+  ShieldAlert, 
+  Terminal,
+  Layers
 } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
+import Markdown from 'react-markdown';
 
 interface TicketDetailViewProps {
   ticketId: string;
-  currentUser: AppUser | null;
+  currentUser: AuthUser;
   onBack: () => void;
   onOpenEscalate: (ticket: Ticket) => void;
-  onStatusChangeNotify: (oldStatus: TicketStatus, newStatus: TicketStatus, ticket: Ticket) => void;
+  onUpdateTicket: (ticket: Ticket) => void;
 }
 
-export const TicketDetailView: React.FC<TicketDetailViewProps> = ({
+const TIMELINE_STEPS = [
+  { key: 'Submitted', label: 'Submitted' },
+  { key: 'AI Reviewed', label: 'AI Reviewed' },
+  { key: 'In Progress', label: 'In Progress' },
+  { key: 'Resolved', label: 'Resolved' }
+];
+
+export function TicketDetailView({
   ticketId,
   currentUser,
   onBack,
   onOpenEscalate,
-  onStatusChangeNotify
-}) => {
+  onUpdateTicket
+}: TicketDetailViewProps) {
   const [ticket, setTicket] = useState<Ticket | null>(null);
-  const [messages, setMessages] = useState<TicketMessage[]>([]);
-  const [escalationLogs, setEscalationLogs] = useState<EscalationLogEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [replyText, setReplyText] = useState('');
-  const [isSending, setIsSending] = useState(false);
-  const [isDraftingAi, setIsDraftingAi] = useState(false);
-  const [activeTab, setActiveTab] = useState<'thread' | 'escalationLog'>('thread');
-  const [remainingTimeText, setRemainingTimeText] = useState('');
-  const [isSlaBreached, setIsSlaBreached] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [generatingAi, setGeneratingAi] = useState(false);
+  const [remainingTime, setRemainingTime] = useState<string>('');
+  const [isBreached, setIsBreached] = useState<boolean>(false);
 
-  const prevStatusRef = useRef<TicketStatus | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // 1. Subscribe to Ticket Document in real-time
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  // 1. Fetch ticket and connect Socket.io room
   useEffect(() => {
-    const unsubscribe = subscribeToTicket(ticketId, (updatedTicket) => {
-      if (updatedTicket) {
-        if (prevStatusRef.current && prevStatusRef.current !== updatedTicket.status) {
-          onStatusChangeNotify(prevStatusRef.current, updatedTicket.status, updatedTicket);
+    let isMounted = true;
+
+    async function loadTicket() {
+      try {
+        setLoading(true);
+        const data = await apiGetTicket(ticketId);
+        if (isMounted) {
+          setTicket(data);
+          onUpdateTicket(data);
         }
-        prevStatusRef.current = updatedTicket.status;
+      } catch (err: any) {
+        if (isMounted) setError(err.message || 'Failed to load ticket.');
+      } finally {
+        if (isMounted) setLoading(false);
       }
-      setTicket(updatedTicket);
-    });
-    return () => unsubscribe();
-  }, [ticketId, onStatusChangeNotify]);
+    }
 
-  // 2. Subscribe to Ticket Messages in real-time
-  useEffect(() => {
-    const unsubscribe = subscribeToTicketMessages(ticketId, (msgs) => {
-      setMessages(msgs);
-      setTimeout(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-      }, 100);
-    });
-    return () => unsubscribe();
-  }, [ticketId]);
+    loadTicket();
+    joinTicketRoom(ticketId);
 
-  // 3. Subscribe to Escalation Logs in real-time
-  useEffect(() => {
-    const unsubscribe = subscribeToEscalationLogs(ticketId, (logs) => {
-      setEscalationLogs(logs);
-    });
-    return () => unsubscribe();
-  }, [ticketId]);
+    // Socket listeners for real-time live updates
+    const socket = getSocket();
 
-  // SLA Timer Countdown
-  useEffect(() => {
-    if (!ticket) return;
-
-    const updateTimer = () => {
-      const now = Date.now();
-      const diff = ticket.slaDeadline - now;
-
-      if (ticket.status === 'Resolved' || ticket.status === 'Closed') {
-        setRemainingTimeText('Resolved within SLA');
-        setIsSlaBreached(false);
-        return;
-      }
-
-      if (diff <= 0) {
-        setIsSlaBreached(true);
-        const overdueHours = Math.floor(Math.abs(diff) / (1000 * 60 * 60));
-        const overdueMins = Math.floor((Math.abs(diff) % (1000 * 60 * 60)) / (1000 * 60));
-        setRemainingTimeText(`⚠️ BREACHED by ${overdueHours}h ${overdueMins}m`);
-      } else {
-        setIsSlaBreached(false);
-        const hours = Math.floor(diff / (1000 * 60 * 60));
-        const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
-        setRemainingTimeText(`${hours}h ${minutes}m remaining`);
+    const handleStatusChanged = (updated: Ticket) => {
+      if (updated.ticketId === ticketId || (updated as any)._id === ticketId) {
+        setTicket(updated);
+        onUpdateTicket(updated);
       }
     };
 
-    updateTimer();
-    const interval = setInterval(updateTimer, 10000);
+    const handleMessageAdded = (payload: { message: any; ticket: Ticket }) => {
+      if (payload.ticket.ticketId === ticketId || (payload.ticket as any)._id === ticketId) {
+        setTicket(payload.ticket);
+        onUpdateTicket(payload.ticket);
+        setTimeout(scrollToBottom, 100);
+      }
+    };
+
+    const handleEscalated = (updated: Ticket) => {
+      if (updated.ticketId === ticketId || (updated as any)._id === ticketId) {
+        setTicket(updated);
+        onUpdateTicket(updated);
+      }
+    };
+
+    socket.on('ticket:status_changed', handleStatusChanged);
+    socket.on('ticket:message', handleMessageAdded);
+    socket.on('ticket:escalated', handleEscalated);
+
+    return () => {
+      isMounted = false;
+      leaveTicketRoom(ticketId);
+      socket.off('ticket:status_changed', handleStatusChanged);
+      socket.off('ticket:message', handleMessageAdded);
+      socket.off('ticket:escalated', handleEscalated);
+    };
+  }, [ticketId]);
+
+  // 2. SLA countdown ticker
+  useEffect(() => {
+    if (!ticket) return;
+
+    const updateSla = () => {
+      const deadline = new Date(ticket.slaDeadline).getTime();
+      const now = Date.now();
+      const diff = deadline - now;
+
+      if (diff <= 0) {
+        setIsBreached(true);
+        const overdue = Math.abs(diff);
+        const hours = Math.floor(overdue / (1000 * 60 * 60));
+        const mins = Math.floor((overdue % (1000 * 60 * 60)) / (1000 * 60));
+        setRemainingTime(`SLA Breached (${hours}h ${mins}m ago)`);
+      } else {
+        setIsBreached(false);
+        const hours = Math.floor(diff / (1000 * 60 * 60));
+        const mins = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+        setRemainingTime(`${hours}h ${mins}m remaining`);
+      }
+    };
+
+    updateSla();
+    const interval = setInterval(updateSla, 15000);
     return () => clearInterval(interval);
   }, [ticket]);
 
-  // Send message handler
-  const handleSendMessage = async (e: React.FormEvent) => {
+  useEffect(() => {
+    scrollToBottom();
+  }, [ticket?.messages]);
+
+  const handleSendReply = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!replyText.trim() || !currentUser || !ticket) return;
+    if (!replyText.trim() || sending || !ticket) return;
 
-    setIsSending(true);
-    const content = replyText.trim();
-    setReplyText('');
-
+    setSending(true);
     try {
-      const senderType = currentUser.role === 'admin' || currentUser.role === 'agent' ? 'agent' : 'user';
-      await addTicketMessage(ticket.id, currentUser.uid, currentUser.name, senderType, content);
-
-      // If user replies and ticket was Resolved, reopen it to In Progress
-      if (senderType === 'user' && (ticket.status === 'Resolved' || ticket.status === 'Closed')) {
-        await updateTicketStatus(ticket.id, 'In Progress');
-      }
-    } catch (err) {
-      console.error('Error sending message:', err);
+      const res = await apiPostTicketMessage(ticket.ticketId, replyText.trim());
+      setTicket(res.ticket);
+      onUpdateTicket(res.ticket);
+      setReplyText('');
+    } catch (err: any) {
+      alert(err.message || 'Failed to post reply.');
     } finally {
-      setIsSending(false);
+      setSending(false);
     }
   };
 
-  // AI draft reply for Support Agents
-  const handleAiDraftReply = async () => {
-    if (!ticket) return;
-    setIsDraftingAi(true);
+  const handleAskGemini = async () => {
+    if (sending || generatingAi || !ticket) return;
+
+    setGeneratingAi(true);
     try {
-      const res = await fetch('/api/ai/agent-assist', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ticket: {
-            title: ticket.title,
-            category: ticket.category,
-            requesterName: ticket.requesterName,
-            ticketNumber: ticket.ticketId,
-            messages: messages.slice(-4).map(m => ({ sender: m.senderName, text: m.content }))
-          }
-        })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.draftReply) {
-          setReplyText(data.draftReply);
-        }
+      const textToAsk = replyText.trim();
+      if (textToAsk) {
+        const res = await apiPostTicketMessage(ticket.ticketId, textToAsk, true);
+        setTicket(res.ticket);
+        onUpdateTicket(res.ticket);
+        setReplyText('');
+      } else {
+        const res = await apiAskAiReply(ticket.ticketId);
+        setTicket(res.ticket);
+        onUpdateTicket(res.ticket);
       }
-    } catch (err) {
-      console.warn('AI assist draft failed:', err);
+    } catch (err: any) {
+      alert(err.message || 'Failed to generate AI response.');
     } finally {
-      setIsDraftingAi(false);
+      setGeneratingAi(false);
     }
   };
 
-  // Assign to logged-in agent
-  const handleAssignToMe = async () => {
-    if (!ticket || !currentUser) return;
-    try {
-      await assignTicketAgent(ticket.id, currentUser.uid, currentUser.name);
-    } catch (err) {
-      console.error('Failed to assign ticket:', err);
-    }
-  };
-
-  // Status transition handler
-  const handleStatusChange = async (newStatus: TicketStatus) => {
+  const handleResolve = async () => {
     if (!ticket) return;
     try {
-      await updateTicketStatus(ticket.id, newStatus);
-    } catch (err) {
-      console.error('Failed to update status:', err);
+      const updated = await apiResolveTicket(ticket.ticketId);
+      setTicket(updated);
+      onUpdateTicket(updated);
+    } catch (err: any) {
+      alert(err.message || 'Failed to mark ticket resolved.');
     }
   };
 
-  if (!ticket) {
+  if (loading) {
     return (
-      <div className="flex-1 flex items-center justify-center p-8 bg-slate-50">
-        <div className="text-center space-y-3">
-          <div className="w-8 h-8 border-3 border-blue-600/30 border-t-blue-600 rounded-full animate-spin mx-auto" />
-          <p className="text-sm font-medium text-slate-500">Loading ticket #{ticketId} from Firestore...</p>
+      <div className="flex-1 flex flex-col items-center justify-center bg-[#121212] text-[#F5F0E6] p-8 space-y-4">
+        <div className="w-8 h-8 border-2 border-[#C0392B]/30 border-t-[#C0392B] rounded-full animate-spin" />
+        <p className="text-xs text-[#8A8175]">Loading ticket details from MongoDB...</p>
+      </div>
+    );
+  }
+
+  if (error || !ticket) {
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center bg-[#121212] text-[#F5F0E6] p-8">
+        <div className="max-w-md text-center">
+          <AlertTriangle className="w-12 h-12 text-[#C0392B] mx-auto mb-4" />
+          <h2 className="text-lg font-bold text-[#F5F0E6] mb-2">Ticket Unavailable</h2>
+          <p className="text-xs text-[#8A8175] mb-6">{error || 'This ticket could not be found.'}</p>
+          <button
+            onClick={onBack}
+            className="px-5 py-2.5 rounded-xl bg-[#1F1F1F] hover:bg-[#2A2A2A] text-xs font-semibold text-[#D1C7B7] transition cursor-pointer"
+          >
+            Return to Dashboard
+          </button>
         </div>
       </div>
     );
   }
 
-  const isStaff = currentUser?.role === 'agent' || currentUser?.role === 'admin';
-
-  // Stepper logic
-  const steps: { label: string; done: boolean; current: boolean }[] = [
-    { label: 'Submitted', done: true, current: false },
-    { label: 'AI Reviewed', done: true, current: false },
-    { 
-      label: 'Assigned', 
-      done: Boolean(ticket.assignedAgentId) || ticket.status !== 'Open', 
-      current: ticket.status === 'Open' && !ticket.assignedAgentId 
-    },
-    { 
-      label: ticket.status === 'Escalated' ? `Escalated (T${ticket.escalationLevel})` : 'In Progress', 
-      done: ticket.status === 'In Progress' || ticket.status === 'Escalated' || ticket.status === 'Resolved' || ticket.status === 'Closed', 
-      current: ticket.status === 'In Progress' || ticket.status === 'Escalated' 
-    },
-    { 
-      label: 'Resolved', 
-      done: ticket.status === 'Resolved' || ticket.status === 'Closed', 
-      current: ticket.status === 'Resolved' || ticket.status === 'Closed' 
-    },
-  ];
+  const isResolved = ticket.status === 'Resolved';
+  const isEscalated = ticket.status === 'Escalated' || ticket.escalationDetails?.isEscalated;
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-slate-50 overflow-hidden">
+    <div className="flex-1 flex flex-col bg-[#121212] text-[#F5F0E6] overflow-hidden">
       {/* Top Header */}
-      <div className="bg-white border-b border-slate-200 px-6 py-4 shrink-0">
-        <div className="flex items-center justify-between gap-4">
-          {/* Back button & Title */}
-          <div className="flex items-center gap-3">
-            <button
-              onClick={onBack}
-              className="p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition"
-              title="Back to Tickets"
-            >
-              <ArrowLeft className="w-5 h-5" />
-            </button>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200">
-                  {ticket.ticketId}
-                </span>
-                <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${
-                  ticket.status === 'Open' ? 'bg-blue-100 text-blue-800' :
-                  ticket.status === 'In Progress' ? 'bg-amber-100 text-amber-800' :
-                  ticket.status === 'Escalated' ? 'bg-rose-100 text-rose-800 font-bold' :
-                  'bg-emerald-100 text-emerald-800'
-                }`}>
-                  {ticket.status}
-                </span>
-                <span className={`px-2 py-0.5 rounded text-xs font-semibold ${
-                  ticket.priority === 'Critical' ? 'bg-rose-50 text-rose-700 border border-rose-200' :
-                  ticket.priority === 'High' ? 'bg-amber-50 text-amber-700 border border-amber-200' :
-                  'bg-slate-50 text-slate-700 border border-slate-200'
-                }`}>
-                  {ticket.priority} Priority
-                </span>
-                <span className="text-xs text-slate-500 font-medium hidden sm:inline">
-                  • {ticket.category}
-                </span>
-              </div>
-              <h1 className="text-lg font-bold text-slate-900 mt-1 leading-snug">
-                {ticket.title}
-              </h1>
+      <div className="px-6 py-4 border-b border-[#242424] bg-[#161616] flex flex-wrap items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <button
+            onClick={onBack}
+            className="p-2 rounded-xl bg-[#1F1F1F] hover:bg-[#282828] text-[#8A8175] hover:text-[#F5F0E6] transition cursor-pointer"
+            title="Back to Tickets"
+          >
+            <ArrowLeft className="w-4 h-4" />
+          </button>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="font-mono text-xs font-bold text-[#C0392B]">{ticket.ticketId}</span>
+              <span className="text-xs text-[#8A8175]">&bull;</span>
+              <span className="text-xs text-[#8A8175]">{ticket.category}</span>
             </div>
-          </div>
-
-          {/* Action Toolbar */}
-          <div className="flex items-center gap-2">
-            {/* Escalate button */}
-            <button
-              onClick={() => onOpenEscalate(ticket)}
-              id="ticket-escalate-btn"
-              className="py-1.5 px-3 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 font-semibold text-xs transition flex items-center gap-1.5 shadow-2xs"
-            >
-              <AlertTriangle className="w-3.5 h-3.5 text-rose-600" />
-              <span>Escalate Ticket</span>
-            </button>
-
-            {/* Staff status selector */}
-            {isStaff && (
-              <div className="flex items-center gap-1.5">
-                {!ticket.assignedAgentId && (
-                  <button
-                    onClick={handleAssignToMe}
-                    className="py-1.5 px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-medium transition"
-                  >
-                    Assign to Me
-                  </button>
-                )}
-
-                <select
-                  value={ticket.status}
-                  onChange={(e) => handleStatusChange(e.target.value as TicketStatus)}
-                  className="py-1.5 px-3 rounded-xl border border-slate-300 bg-white text-slate-800 text-xs font-semibold focus:ring-2 focus:ring-blue-500"
-                >
-                  <option value="Open">Status: Open</option>
-                  <option value="In Progress">Status: In Progress</option>
-                  <option value="Escalated">Status: Escalated</option>
-                  <option value="Resolved">Status: Resolved</option>
-                  <option value="Closed">Status: Closed</option>
-                </select>
-              </div>
-            )}
-
-            {!isStaff && ticket.status !== 'Resolved' && (
-              <button
-                onClick={() => handleStatusChange('Resolved')}
-                className="py-1.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs transition flex items-center gap-1.5 shadow-2xs"
-              >
-                <CheckCircle2 className="w-3.5 h-3.5" />
-                <span>Mark as Resolved</span>
-              </button>
-            )}
+            <h1 className="text-base sm:text-lg font-bold text-[#F5F0E6] tracking-tight truncate max-w-xl">
+              {ticket.title}
+            </h1>
           </div>
         </div>
 
-        {/* Stepper / Timeline Bar */}
-        <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between">
-          <div className="flex items-center gap-1 sm:gap-2 text-xs overflow-x-auto py-1">
-            {steps.map((step, idx) => (
-              <React.Fragment key={step.label}>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${
-                    step.done 
-                      ? 'bg-blue-600 text-white' 
-                      : step.current 
-                      ? 'bg-blue-100 text-blue-800 ring-2 ring-blue-500' 
-                      : 'bg-slate-100 text-slate-400'
-                  }`}>
-                    {step.done ? '✓' : idx + 1}
-                  </div>
-                  <span className={`font-medium ${
-                    step.done ? 'text-slate-800 font-semibold' : 'text-slate-400'
-                  }`}>
-                    {step.label}
-                  </span>
-                </div>
-                {idx < steps.length - 1 && (
-                  <ChevronRight className="w-3.5 h-3.5 text-slate-300 shrink-0" />
-                )}
-              </React.Fragment>
-            ))}
-          </div>
-
-          {/* SLA Countdown Display */}
-          <div className={`text-xs font-semibold px-2.5 py-1 rounded-lg border flex items-center gap-1.5 shrink-0 ${
-            isSlaBreached 
-              ? 'bg-rose-50 text-rose-700 border-rose-200 animate-pulse' 
-              : 'bg-slate-50 text-slate-600 border-slate-200'
+        {/* Status badges & CTAs */}
+        <div className="flex items-center gap-2.5">
+          <span className={`px-2.5 py-1 rounded-full text-xs font-semibold uppercase tracking-wider ${
+            ticket.priority === 'Critical' ? 'bg-red-950/80 text-red-400 border border-red-800/60' :
+            ticket.priority === 'High' ? 'bg-amber-950/80 text-amber-400 border border-amber-800/60' :
+            'bg-slate-800 text-slate-300 border border-slate-700'
           }`}>
-            <Clock className="w-3.5 h-3.5" />
-            <span>SLA: {remainingTimeText}</span>
-          </div>
+            {ticket.priority}
+          </span>
+
+          <span className={`px-2.5 py-1 rounded-full text-xs font-semibold uppercase tracking-wider ${
+            ticket.status === 'Resolved' ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/60' :
+            ticket.status === 'Escalated' ? 'bg-red-950 text-red-300 border border-red-700 animate-pulse' :
+            'bg-[#2A2A2A] text-[#D1C7B7] border border-[#3A3A3A]'
+          }`}>
+            {ticket.status}
+          </span>
+
+          {!isResolved && !isEscalated && (
+            <button
+              onClick={() => onOpenEscalate(ticket)}
+              className="px-3 py-1.5 rounded-xl bg-[#251A1A] hover:bg-[#381F1F] text-[#E74C3C] border border-[#C0392B]/40 text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer shadow-xs"
+            >
+              <AlertOctagon className="w-3.5 h-3.5" />
+              <span>Escalate Ticket</span>
+            </button>
+          )}
+
+          {!isResolved && (
+            <button
+              onClick={handleResolve}
+              className="px-3.5 py-1.5 rounded-xl bg-[#1C2820] hover:bg-[#243B2C] text-emerald-400 border border-emerald-800/50 text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer shadow-xs"
+            >
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              <span>Mark Resolved</span>
+            </button>
+          )}
         </div>
       </div>
 
-      {/* Main Area: 2 Columns */}
-      <div className="flex-1 flex overflow-hidden">
-        {/* Left: Message Thread */}
-        <div className="flex-1 flex flex-col bg-white border-r border-slate-200 overflow-hidden">
-          {/* Sub-header tabs */}
-          <div className="px-6 py-2 border-b border-slate-100 flex items-center justify-between bg-slate-50/40">
-            <div className="flex items-center gap-4 text-xs font-semibold">
-              <button
-                onClick={() => setActiveTab('thread')}
-                className={`pb-1 border-b-2 transition ${
-                  activeTab === 'thread' ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500 hover:text-slate-800'
-                }`}
-              >
-                Conversation Thread ({messages.length})
-              </button>
-              <button
-                onClick={() => setActiveTab('escalationLog')}
-                className={`pb-1 border-b-2 flex items-center gap-1 transition ${
-                  activeTab === 'escalationLog' ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500 hover:text-slate-800'
-                }`}
-              >
-                <History className="w-3.5 h-3.5" />
-                <span>Escalation History ({escalationLogs.length})</span>
-              </button>
-            </div>
-            <span className="text-[11px] text-slate-400">
-              Live Firestore Sync Active
-            </span>
-          </div>
+      {/* SLA & Timeline Banner */}
+      <div className="px-6 py-3 border-b border-[#222] bg-[#141414] flex flex-col md:flex-row md:items-center justify-between gap-4 text-xs">
+        {/* Visual Timeline: Submitted -> AI Reviewed -> In Progress -> (Escalated) -> Resolved */}
+        <div className="flex items-center gap-2 overflow-x-auto py-1">
+          <span className="text-[#8A8175] text-[11px] uppercase font-semibold mr-1">Progress:</span>
+          {['Submitted', 'AI Reviewed', 'In Progress', ...(isEscalated ? ['Escalated'] : []), 'Resolved'].map((step, idx, arr) => {
+            const isCurrent = ticket.status === step;
+            const isPassed = !isCurrent && (
+              step === 'Submitted' ||
+              (step === 'AI Reviewed' && ['In Progress', 'Escalated', 'Resolved'].includes(ticket.status)) ||
+              (step === 'In Progress' && ['Escalated', 'Resolved'].includes(ticket.status)) ||
+              (step === 'Escalated' && ticket.status === 'Resolved')
+            );
 
-          {/* Thread View */}
-          {activeTab === 'thread' ? (
-            <div className="flex-1 overflow-y-auto p-6 space-y-4">
-              {/* Original ticket description post */}
-              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <div className="w-7 h-7 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center font-bold text-xs">
-                      {ticket.requesterName.slice(0, 2)}
-                    </div>
-                    <div>
-                      <span className="text-xs font-bold text-slate-900">{ticket.requesterName}</span>
-                      <span className="text-[10px] text-slate-400 ml-2">Ticket Requester</span>
-                    </div>
-                  </div>
-                  <span className="text-[11px] text-slate-400">
-                    {new Date(ticket.createdAt).toLocaleString()}
+            return (
+              <React.Fragment key={step}>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <div className={`w-2.5 h-2.5 rounded-full flex items-center justify-center ${
+                    isCurrent 
+                      ? step === 'Escalated' ? 'bg-[#C0392B] ring-2 ring-red-500/40' : 'bg-[#C0392B] ring-2 ring-red-500/30'
+                      : isPassed ? 'bg-emerald-500' : 'bg-[#333]'
+                  }`} />
+                  <span className={`${
+                    isCurrent ? 'text-[#F5F0E6] font-bold' : isPassed ? 'text-[#D1C7B7]' : 'text-[#666]'
+                  }`}>
+                    {step}
                   </span>
                 </div>
-                <p className="text-sm text-slate-800 whitespace-pre-wrap leading-relaxed">
-                  {ticket.description}
-                </p>
-
-                {ticket.attachmentUrl && (
-                  <div className="pt-2 border-t border-slate-200 flex items-center gap-2 text-xs text-blue-600">
-                    <Paperclip className="w-3.5 h-3.5" />
-                    <span className="font-medium truncate max-w-xs">{ticket.attachmentName || 'Attached File'}</span>
-                  </div>
+                {idx < arr.length - 1 && (
+                  <div className={`w-4 h-[1px] ${isPassed ? 'bg-emerald-600' : 'bg-[#2A2A2A]'}`} />
                 )}
-              </div>
+              </React.Fragment>
+            );
+          })}
+        </div>
 
-              {/* Message thread items */}
-              {messages.map((m) => {
-                const isAi = m.senderType === 'AI';
-                const isAgent = m.senderType === 'agent';
-                const isUser = m.senderType === 'user';
+        {/* SLA Status Pill */}
+        <div className="flex items-center gap-2 shrink-0">
+          <Clock className={`w-3.5 h-3.5 ${isBreached ? 'text-[#E74C3C]' : 'text-emerald-400'}`} />
+          <span className="text-[#8A8175]">Target SLA ({ticket.slaHours}h):</span>
+          <span className={`font-mono font-semibold ${isBreached ? 'text-[#E74C3C]' : 'text-emerald-400'}`}>
+            {remainingTime}
+          </span>
+        </div>
+      </div>
 
-                return (
-                  <div 
-                    key={m.id}
-                    className={`flex flex-col space-y-1.5 ${
-                      isAi 
-                        ? 'p-4 rounded-xl bg-gradient-to-br from-indigo-50/70 to-blue-50/70 border border-indigo-200/80' 
-                        : isAgent
-                        ? 'p-4 rounded-xl bg-amber-50/40 border border-amber-200/60'
-                        : 'p-4 rounded-xl bg-white border border-slate-200 shadow-2xs'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        {isAi ? (
-                          <div className="w-6 h-6 rounded-lg bg-indigo-600 text-white flex items-center justify-center">
-                            <Sparkles className="w-3.5 h-3.5" />
-                          </div>
-                        ) : isAgent ? (
-                          <div className="w-6 h-6 rounded-lg bg-amber-600 text-white flex items-center justify-center text-xs font-bold">
-                            🎧
-                          </div>
-                        ) : (
-                          <div className="w-6 h-6 rounded-lg bg-slate-200 text-slate-700 flex items-center justify-center text-xs font-bold">
-                            <User className="w-3.5 h-3.5" />
-                          </div>
-                        )}
-
-                        <span className="text-xs font-bold text-slate-900">
-                          {m.senderName}
-                        </span>
-
-                        {isAi && (
-                          <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-indigo-100 text-indigo-700">
-                            Automated First Response
-                          </span>
-                        )}
-                        {isAgent && (
-                          <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-amber-100 text-amber-800">
-                            Support Engineer
-                          </span>
-                        )}
-                      </div>
-
-                      <span className="text-[10px] text-slate-400">
-                        {new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                      </span>
-                    </div>
-
-                    <div className="text-xs sm:text-sm text-slate-800 leading-relaxed pl-8">
-                      <ReactMarkdown>{m.content}</ReactMarkdown>
-                    </div>
-                  </div>
-                );
-              })}
-
-              <div ref={messagesEndRef} />
+      {/* Main Thread Content */}
+      <div className="flex-1 overflow-y-auto p-6 space-y-6">
+        {/* Original Description Card */}
+        <div className="bg-[#181818] border border-[#282828] rounded-2xl p-5 shadow-lg">
+          <div className="flex items-center justify-between mb-3 text-xs text-[#8A8175]">
+            <div className="flex items-center gap-2">
+              <span className="font-semibold text-[#F5F0E6]">{ticket.requesterName}</span>
+              <span>({ticket.requesterEmail})</span>
             </div>
-          ) : (
-            /* Escalation Log Tab */
-            <div className="flex-1 overflow-y-auto p-6 space-y-3">
-              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                Audit Trail & Escalation Log
-              </h3>
-              {escalationLogs.length === 0 ? (
-                <div className="p-8 text-center text-slate-400 text-sm">
-                  No escalations recorded. The ticket is running within initial SLA parameters.
-                </div>
-              ) : (
-                escalationLogs.map((log) => (
-                  <div 
-                    key={log.id} 
-                    className="p-3.5 rounded-xl bg-rose-50/60 border border-rose-200 text-xs space-y-1"
-                  >
-                    <div className="flex items-center justify-between font-bold text-rose-900">
-                      <span className="flex items-center gap-1.5">
-                        <AlertTriangle className="w-4 h-4 text-rose-600" />
-                        Escalated: Tier {log.fromLevel} → Tier {log.toLevel}
-                      </span>
-                      <span className="text-[10px] text-rose-700 font-normal">
-                        {new Date(log.timestamp).toLocaleString()}
-                      </span>
-                    </div>
-                    <p className="text-slate-800">
-                      <strong>Reason:</strong> {log.reason}
-                    </p>
-                    <p className="text-[11px] text-slate-500">
-                      <strong>Initiator:</strong> {log.triggeredBy}
-                    </p>
-                  </div>
-                ))
-              )}
+            <span>{new Date(ticket.createdAt).toLocaleString()}</span>
+          </div>
+
+          <p className="text-sm text-[#F5F0E6] whitespace-pre-wrap leading-relaxed">
+            {ticket.description}
+          </p>
+
+          {ticket.attachment && (
+            <div className="mt-4 pt-3 border-t border-[#262626] flex items-center gap-2 text-xs text-[#D1C7B7]">
+              <Paperclip className="w-3.5 h-3.5 text-[#8A8175]" />
+              <span className="font-mono text-[11px] text-[#C0392B]">Attachment:</span>
+              <a 
+                href={ticket.attachment.url} 
+                target="_blank" 
+                rel="noreferrer"
+                className="underline hover:text-[#F5F0E6] truncate max-w-sm"
+              >
+                {ticket.attachment.name}
+              </a>
             </div>
           )}
+        </div>
 
-          {/* Reply Box */}
-          <div className="p-4 border-t border-slate-200 bg-white">
-            <form onSubmit={handleSendMessage} className="space-y-2">
-              <div className="flex items-center justify-between text-xs text-slate-500">
-                <span>Reply as <strong>{currentUser?.name || 'Guest'}</strong></span>
-                {isStaff && (
-                  <button
-                    type="button"
-                    onClick={handleAiDraftReply}
-                    disabled={isDraftingAi}
-                    className="text-indigo-600 hover:text-indigo-800 font-semibold flex items-center gap-1 transition"
-                  >
-                    <Sparkles className="w-3.5 h-3.5" />
-                    <span>{isDraftingAi ? 'AI Drafting...' : 'Draft Response with AI Assist'}</span>
-                  </button>
-                )}
-              </div>
+        {/* Message Thread */}
+        <div className="space-y-4 pt-2">
+          {ticket.messages.map((msg, index) => {
+            if (msg.isAi) {
+              return (
+                /* Distinct AI Assistant Message Bubble */
+                <div key={msg.id || index} className="flex items-start gap-3.5 max-w-3xl animate-fadeIn">
+                  <div className="w-8 h-8 rounded-xl bg-[#C0392B] border border-red-500/30 flex items-center justify-center text-white shrink-0 mt-1 shadow-md shadow-red-950/50">
+                    <Sparkles className="w-4 h-4" />
+                  </div>
+                  <div className="flex-1 bg-[#1C1C1C] border-l-4 border-l-[#C0392B] border-y border-r border-[#2C2C2C] rounded-2xl p-5 shadow-xl shadow-black/40">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-[#F5F0E6] tracking-wide">
+                          {msg.sender || 'AI Assistant'}
+                        </span>
+                        <span className="px-2 py-0.5 rounded-full bg-[#C0392B]/20 text-[#E74C3C] text-[10px] font-bold uppercase tracking-wider border border-[#C0392B]/30">
+                          Automated Diagnostics
+                        </span>
+                      </div>
+                      <span className="text-[11px] text-[#8A8175]">
+                        {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                    </div>
 
-              <div className="relative">
-                <textarea
-                  rows={3}
-                  value={replyText}
-                  onChange={(e) => setReplyText(e.target.value)}
-                  placeholder="Type your reply here (Markdown supported)..."
-                  className="w-full px-3.5 py-2.5 text-sm rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-900 placeholder:text-slate-400 resize-none"
-                />
-              </div>
+                    <div className="text-xs text-[#D1C7B7] space-y-2 leading-relaxed prose prose-invert max-w-none">
+                      <Markdown>{msg.text}</Markdown>
+                    </div>
+                  </div>
+                </div>
+              );
+            }
 
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] text-slate-400">
-                  Press Send to post immediately to the thread
-                </span>
-                <button
-                  type="submit"
-                  disabled={isSending || !replyText.trim()}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs sm:text-sm rounded-xl transition shadow-xs flex items-center gap-1.5 disabled:opacity-50"
+            const isCurrentUser = msg.senderEmail === currentUser.email;
+
+            return (
+              /* User / Support human message bubble */
+              <div
+                key={msg.id || index}
+                className={`flex flex-col ${isCurrentUser ? 'items-end' : 'items-start'} animate-fadeIn`}
+              >
+                <div className="flex items-center gap-2 mb-1 px-1 text-[11px] text-[#8A8175]">
+                  <span className="font-semibold text-[#D1C7B7]">{msg.sender}</span>
+                  <span>&bull;</span>
+                  <span>{new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                </div>
+                <div
+                  className={`max-w-xl rounded-2xl px-5 py-3.5 text-xs leading-relaxed shadow-md ${
+                    isCurrentUser
+                      ? 'bg-[#262626] border border-[#383838] text-[#F5F0E6]'
+                      : 'bg-[#1C1C1C] border border-[#2D2D2D] text-[#D1C7B7]'
+                  }`}
                 >
+                  <p className="whitespace-pre-wrap">{msg.text}</p>
+                </div>
+              </div>
+            );
+          })}
+          <div ref={messagesEndRef} />
+        </div>
+      </div>
+
+      {/* Reply Input Bar */}
+      <div className="p-4 border-t border-[#242424] bg-[#161616]">
+        {isResolved ? (
+          <div className="p-3 bg-[#1C2820] border border-emerald-900/50 rounded-xl text-center text-xs text-emerald-300 font-medium">
+            This ticket has been marked as <strong>Resolved</strong>. If you require further assistance, submit a new service request.
+          </div>
+        ) : (
+          <form onSubmit={handleSendReply} className="flex items-center gap-3 max-w-5xl mx-auto">
+            <input
+              type="text"
+              value={replyText}
+              onChange={(e) => setReplyText(e.target.value)}
+              placeholder="Type your reply or additional error logs..."
+              disabled={sending}
+              className="flex-1 px-4 py-3 bg-[#121212] border border-[#2D2D2D] focus:border-[#C0392B] rounded-xl text-xs text-[#F5F0E6] placeholder-[#555] outline-none transition"
+            />
+            <button
+              type="button"
+              onClick={handleAskGemini}
+              disabled={sending || generatingAi}
+              className="px-4 py-3 bg-[#241A1A] hover:bg-[#331C1C] border border-[#C0392B]/50 hover:border-[#C0392B] text-[#F5B7B1] text-xs font-semibold rounded-xl transition flex items-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+              title="Request direct technical response & diagnostics from Gemini AI"
+            >
+              {generatingAi ? (
+                <>
+                  <div className="w-3.5 h-3.5 border-2 border-red-400/30 border-t-red-400 rounded-full animate-spin" />
+                  <span className="hidden sm:inline">Gemini Thinking...</span>
+                </>
+              ) : (
+                <>
+                  <Sparkles className="w-3.5 h-3.5 text-red-400" />
+                  <span className="hidden sm:inline">Ask Gemini AI</span>
+                </>
+              )}
+            </button>
+            <button
+              type="submit"
+              disabled={sending || generatingAi || !replyText.trim()}
+              className="px-5 py-3 bg-[#C0392B] hover:bg-[#A93226] disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-semibold rounded-xl transition flex items-center gap-2 cursor-pointer shadow-md shadow-red-950/40"
+            >
+              {sending ? (
+                <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+              ) : (
+                <>
+                  <span>Send</span>
                   <Send className="w-3.5 h-3.5" />
-                  <span>Send Reply</span>
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-
-        {/* Right Sidebar: Ticket Metadata & Agent Details */}
-        <div className="w-80 bg-slate-50/50 p-6 space-y-6 overflow-y-auto hidden lg:block border-l border-slate-200 text-xs">
-          {/* SLA Card */}
-          <div className="p-4 rounded-xl bg-white border border-slate-200 shadow-2xs space-y-3">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-              SLA Compliance
-            </span>
-            <div className="flex items-center justify-between">
-              <span className="text-slate-600">Target Resolution:</span>
-              <span className="font-semibold text-slate-900">
-                {new Date(ticket.slaDeadline).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} ({new Date(ticket.slaDeadline).toLocaleDateString()})
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-slate-600">Escalation Tier:</span>
-              <span className={`px-2 py-0.5 rounded font-bold ${
-                ticket.escalationLevel > 0 ? 'bg-rose-100 text-rose-800' : 'bg-slate-100 text-slate-700'
-              }`}>
-                Tier {ticket.escalationLevel}
-              </span>
-            </div>
-          </div>
-
-          {/* Requester Card */}
-          <div className="p-4 rounded-xl bg-white border border-slate-200 shadow-2xs space-y-2">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-              Requester Details
-            </span>
-            <div className="text-sm font-bold text-slate-900">{ticket.requesterName}</div>
-            <div className="text-slate-500">{ticket.requesterEmail}</div>
-            <div className="text-[11px] text-slate-400 pt-1">
-              Customer ID: {ticket.userId.slice(0, 8)}
-            </div>
-          </div>
-
-          {/* Assigned Agent Card */}
-          <div className="p-4 rounded-xl bg-white border border-slate-200 shadow-2xs space-y-2">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-              Assigned Specialist
-            </span>
-            {ticket.assignedAgentName ? (
-              <div className="flex items-center gap-2">
-                <div className="w-7 h-7 rounded-full bg-emerald-100 text-emerald-800 flex items-center justify-center font-bold text-xs">
-                  {ticket.assignedAgentName.slice(0, 2)}
-                </div>
-                <div>
-                  <div className="font-bold text-slate-900">{ticket.assignedAgentName}</div>
-                  <div className="text-[10px] text-emerald-700 font-medium">Assigned Engineer</div>
-                </div>
-              </div>
-            ) : (
-              <div className="text-slate-400 italic">Unassigned (In Triage Queue)</div>
-            )}
-          </div>
-
-          {/* Ticket Metadata */}
-          <div className="p-4 rounded-xl bg-white border border-slate-200 shadow-2xs space-y-2">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-              Ticket Details
-            </span>
-            <div className="flex justify-between py-1 border-b border-slate-100">
-              <span className="text-slate-500">Category:</span>
-              <span className="font-semibold text-slate-800">{ticket.category}</span>
-            </div>
-            <div className="flex justify-between py-1 border-b border-slate-100">
-              <span className="text-slate-500">Created:</span>
-              <span className="text-slate-700">{new Date(ticket.createdAt).toLocaleDateString()}</span>
-            </div>
-            <div className="flex justify-between py-1">
-              <span className="text-slate-500">Last Activity:</span>
-              <span className="text-slate-700">{new Date(ticket.updatedAt).toLocaleTimeString()}</span>
-            </div>
-          </div>
-        </div>
+                </>
+              )}
+            </button>
+          </form>
+        )}
       </div>
     </div>
   );
-};
+}

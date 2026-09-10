@@ -1,30 +1,32 @@
-export type UserRole = 'user' | 'agent' | 'admin';
+export type TicketPriority = 'Critical' | 'High' | 'Medium' | 'Low';
+export type TicketStatus = 'Submitted' | 'AI Reviewed' | 'In Progress' | 'Escalated' | 'Resolved';
 
-export interface AppUser {
-  uid: string;
+export interface AuthUser {
+  id: string;
   name: string;
   email: string;
-  role: UserRole;
-  createdAt: string;
 }
 
-export type TicketPriority = 'Low' | 'Medium' | 'High' | 'Critical';
+export interface TicketMessage {
+  id: string;
+  sender: string;
+  senderEmail: string;
+  text: string;
+  timestamp: string | Date;
+  isAi: boolean;
+}
 
-export type TicketStatus = 'Open' | 'In Progress' | 'Escalated' | 'Resolved' | 'Closed';
-
-export type TicketCategory =
-  | 'Software Bug'
-  | 'Network & Connectivity'
-  | 'Cloud & Infrastructure'
-  | 'Account & Authentication'
-  | 'Billing & Invoicing'
-  | 'Performance & Latency'
-  | 'Hardware Issue'
-  | 'Service Complaint';
+export interface TicketEscalation {
+  isEscalated: boolean;
+  escalatedAt?: string | Date;
+  reason?: string;
+  notifiedEmail?: string;
+  channel?: string;
+}
 
 export interface Ticket {
-  id: string; // Firestore document ID
-  ticketId: string; // Formatted ID e.g. "TSC-2026-4891"
+  _id?: string;
+  ticketId: string;
   userId: string;
   requesterName: string;
   requesterEmail: string;
@@ -33,35 +35,30 @@ export interface Ticket {
   category: string;
   priority: TicketPriority;
   status: TicketStatus;
-  assignedAgentId?: string | null;
-  assignedAgentName?: string | null;
-  slaDeadline: number; // epoch ms
-  escalationLevel: number; // 0, 1, 2, 3
-  attachmentUrl?: string | null;
-  attachmentName?: string | null;
-  createdAt: number; // epoch ms
-  updatedAt: number; // epoch ms
+  slaDeadline: string | Date;
+  slaHours: number;
+  aiSuggestedResponse?: string;
+  attachment?: {
+    name: string;
+    url: string;
+    type?: string;
+    size?: number;
+  };
+  messages: TicketMessage[];
+  escalationDetails?: TicketEscalation;
+  createdAt: string | Date;
+  updatedAt: string | Date;
 }
 
-export interface TicketMessage {
-  id: string;
-  senderId: string;
-  senderName: string;
-  senderType: 'user' | 'agent' | 'AI';
-  content: string;
-  timestamp: number;
+export interface MongoStatus {
+  isConnected: boolean;
+  connectionType: 'atlas' | 'fallback_memory';
+  readyState: number;
+  connectionError: string | null;
+  uriConfigured: boolean;
 }
 
-export interface EscalationLogEntry {
-  id: string;
-  fromLevel: number;
-  toLevel: number;
-  reason: string;
-  triggeredBy: string;
-  timestamp: number;
-}
-
-export interface ToastNotification {
+export interface ToastAlert {
   id: string;
   title: string;
   message: string;
@@ -69,5 +66,3 @@ export interface ToastNotification {
   ticketId?: string;
   timestamp: number;
 }
-
-export type ActiveNavTab = 'tickets' | 'new-ticket' | 'queue' | 'agents' | 'analytics' | 'faq';
